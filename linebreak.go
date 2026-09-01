@@ -58,8 +58,41 @@ type Line struct {
 type breakNode struct {
 	position int        // item index of this breakpoint
 	line     int        // number of the line ending here
+	fitness  int        // fitness class of the line ending here (veryLoose…tight)
 	demerits float64    // total demerits of the best path to here
 	prev     *breakNode // the breakpoint that begins this line
+}
+
+// The four fitness classes TeX sorts lines into, by how hard their spaces had to
+// work (tex.web §16099-16105). Two adjacent lines whose classes differ by more
+// than one look wrong side by side — a very loose line under a tight one — and
+// cost AdjDemerits.
+const (
+	veryLoose = 0 // stretching more than its stretchability
+	loose     = 1 // stretching 0.5 to 1.0 of it
+	decent    = 2 // everything else
+	tight     = 3 // shrinking 0.5 to 1.0 of its shrinkability
+)
+
+// Params carries the costs TeX charges besides the line's own badness. The zero
+// value is not useful; DefaultParams holds the values every LaTeX document runs
+// with (latex.ltx:498-514).
+type Params struct {
+	Tolerance   float64 // \tolerance: the worst badness ratio a line may have
+	LinePenalty float64 // \linepenalty: charged once per line, so fewer lines cost less
+	AdjDemerits float64 // \adjdemerits: adjacent lines two fitness classes apart
+	DoubleHyph  float64 // \doublehyphendemerits: two hyphenated lines in a row
+	FinalHyph   float64 // \finalhyphendemerits: a hyphen on the last line but one
+}
+
+// DefaultParams are LaTeX's own settings (latex.ltx:498-514): \tolerance=200,
+// \linepenalty=10, \adjdemerits=10000, \doublehyphendemerits=10000,
+// \finalhyphendemerits=5000.
+func DefaultParams(tolerance, linePenalty float64) Params {
+	return Params{
+		Tolerance: tolerance, LinePenalty: linePenalty,
+		AdjDemerits: 10000, DoubleHyph: 10000, FinalHyph: 5000,
+	}
 }
 
 // KnuthPlass breaks items into lines of the given width, minimising total
@@ -67,6 +100,12 @@ type breakNode struct {
 // paragraph into many short ones). It returns the chosen lines in
 // order and ok=false if no sequence of feasible breaks exists within tolerance.
 func KnuthPlass(items []Item, lineWidth, tolerance, linePenalty float64) ([]Line, bool) {
+	return KnuthPlassWith(items, lineWidth, DefaultParams(tolerance, linePenalty))
+}
+
+// KnuthPlassWith is KnuthPlass with the costs stated explicitly, for a caller
+// that threads a document's own \adjdemerits and friends.
+func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 	// Prefix sums of width/stretch/shrink over items strictly before index i, so
 	// the material of a line from break a to break b is sums[b]−sums[a].
 	n := len(items)
@@ -115,7 +154,10 @@ func KnuthPlass(items []Item, lineWidth, tolerance, linePenalty float64) ([]Line
 		return
 	}
 
-	active := []*breakNode{{position: 0, line: 0}}
+	// The paragraph starts as if the line before it had been decent (tex.web
+	// §17032, fitness(q):=decent_fit), so a first line two classes away from decent
+	// is charged like any other mismatch.
+	active := []*breakNode{{position: 0, line: 0, fitness: decent}}
 	var best *breakNode
 
 	for b := 1; b <= n; b++ {
@@ -124,7 +166,10 @@ func KnuthPlass(items []Item, lineWidth, tolerance, linePenalty float64) ([]Line
 		}
 		forced := b == n || (items[b].Kind == KPenalty && items[b].Penalty <= -InfPenalty)
 		var survivors []*breakNode
-		var bestHere *breakNode
+		// TeX keeps the best break for EACH fitness class, not one overall
+		// (§16480-16486): a line that is merely decent may be the wrong ancestor for
+		// the next one, and only keeping all four lets \adjdemerits decide.
+		var bestHere [4]*breakNode
 		for _, a := range active {
 			w, y, z := measure(a.position, b)
 			r := ratio(w, y, z, lineWidth)
@@ -135,19 +180,23 @@ func KnuthPlass(items []Item, lineWidth, tolerance, linePenalty float64) ([]Line
 			}
 			// A break is taken from a if the line is feasible, or if the break is
 			// forced (then even an over/underfull line must close the paragraph).
-			if (r >= -1 && r <= tolerance) || forced {
-				d := demerits(r, penaltyAt(items, b), flaggedAt(items, b), a, items, linePenalty)
+			if (r >= -1 && r <= p.Tolerance) || forced {
+				fit := fitness(r)
+				d := demerits(r, fit, penaltyAt(items, b), flaggedAt(items, b), a, items, b == n, p)
 				total := a.demerits + d
-				if bestHere == nil || total < bestHere.demerits {
-					bestHere = &breakNode{position: b, line: a.line + 1, demerits: total, prev: a}
+				if cur := bestHere[fit]; cur == nil || total < cur.demerits {
+					bestHere[fit] = &breakNode{position: b, line: a.line + 1, fitness: fit, demerits: total, prev: a}
 				}
 			}
 		}
 		active = survivors
-		if bestHere != nil {
-			active = append(active, bestHere)
-			if forced && (best == nil || bestHere.demerits < best.demerits) {
-				best = bestHere
+		for _, nd := range bestHere {
+			if nd == nil {
+				continue
+			}
+			active = append(active, nd)
+			if forced && (best == nil || nd.demerits < best.demerits) {
+				best = nd
 			}
 		}
 	}
@@ -212,12 +261,43 @@ func flaggedAt(items []Item, b int) bool {
 	return b < len(items) && items[b].Kind == KPenalty && items[b].Flagged
 }
 
-// demerits is the cost of one line: (linePenalty + badness)² adjusted by the
-// breakpoint penalty and a flagged-break penalty.
-func demerits(r, pen float64, flagged bool, a *breakNode, items []Item, linePenalty float64) float64 {
+// fitness classifies a line by how hard its spaces worked, on the badness scale
+// TeX uses (tex.web §16790-16812): stretching, badness over 99 is very loose and
+// over 12 is loose; shrinking, badness over 12 is tight; everything else decent.
+// Badness 12 is a ratio of about a half, 99 about one.
+func fitness(r float64) int {
 	b := badness(r)
-	base := linePenalty + b
-	d := base * base
+	switch {
+	case r < 0:
+		if b > 12 {
+			return tight
+		}
+	case b > 99:
+		return veryLoose
+	case b > 12:
+		return loose
+	}
+	return decent
+}
+
+// demerits is the cost of one line (tex.web §16900-16910):
+//
+//	d := line_penalty + b;
+//	if abs(d) >= 10000 then d := 100000000 else d := d*d;
+//	if pi <> 0 then if pi > 0 then d := d + pi*pi
+//	  else if pi > eject_penalty then d := d - pi*pi;
+//	if (break_type = hyphenated) and (type(r) = hyphenated) then
+//	  if cur_p <> null then d := d + double_hyphen_demerits
+//	  else d := d + final_hyphen_demerits;
+//	if abs(fit_class - fitness(r)) > 1 then d := d + adj_demerits;
+func demerits(r float64, fit int, pen float64, flagged bool, a *breakNode, items []Item, atEnd bool, p Params) float64 {
+	base := p.LinePenalty + badness(r)
+	var d float64
+	if math.Abs(base) >= 10000 {
+		d = 1e8 // TeX's ceiling: past this the line is hopeless, not merely bad
+	} else {
+		d = base * base
+	}
 	if pen > 0 && pen < InfPenalty {
 		d += pen * pen
 	} else if pen > -InfPenalty && pen < 0 {
@@ -225,7 +305,16 @@ func demerits(r, pen float64, flagged bool, a *breakNode, items []Item, linePena
 	}
 	if flagged && a.position > 0 && a.position < len(items) &&
 		items[a.position].Kind == KPenalty && items[a.position].Flagged {
-		d += 10000 // consecutive flagged (double-hyphen) penalty
+		// Two hyphenated lines running: the last line but one costs less, because
+		// TeX would rather hyphenate there than leave the paragraph ragged.
+		if atEnd {
+			d += p.FinalHyph
+		} else {
+			d += p.DoubleHyph
+		}
+	}
+	if fit-a.fitness > 1 || a.fitness-fit > 1 {
+		d += p.AdjDemerits
 	}
 	return d
 }
