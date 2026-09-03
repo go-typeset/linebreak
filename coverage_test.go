@@ -1,6 +1,9 @@
 package linebreak
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // Glyph carries a rune and its vertical metrics: it is the box a typesetter makes
 // for one character, as against the metric-only Box.
@@ -24,6 +27,25 @@ func TestNoFeasibleBreaksReportsFailure(t *testing.T) {
 	items := []Item{Box(500), Glue(0, 0, 1), Box(1), Glue(0, 0, 0), Box(1)}
 	if lines, ok := KnuthPlass(items, 10, 1, 10); ok {
 		t.Errorf("a paragraph with no breakpoint reported success: %v", lines)
+	}
+}
+
+// The tolerance is compared against BADNESS, not against the adjustment ratio
+// (tex.web §16773). Badness is 100·r³, so the same paragraph — every line
+// stretched to one and a half times its stretchability, badness 337 — is out of
+// reach at \tolerance=200 and within it at 400. Comparing the ratio itself would
+// admit both, and with it lines nobody would set.
+func TestToleranceIsABadnessNotARatio(t *testing.T) {
+	items := para(4, 2, 1, 1, 0.5) // breaking in the middle leaves r=1.5 on each line
+	if _, ok := KnuthPlass(items, 6.5, 200, 10); ok {
+		t.Error("badness 337 was accepted at \\tolerance=200")
+	}
+	lines, ok := KnuthPlass(items, 6.5, 400, 10)
+	if !ok || len(lines) != 2 {
+		t.Fatalf("at \\tolerance=400: ok=%v lines=%d, want 2 lines", ok, len(lines))
+	}
+	if math.Abs(lines[0].Ratio-1.5) > 1e-6 {
+		t.Errorf("first-line ratio=%.3f, want 1.5", lines[0].Ratio)
 	}
 }
 

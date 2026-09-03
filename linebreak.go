@@ -78,7 +78,7 @@ const (
 // value is not useful; DefaultParams holds the values every LaTeX document runs
 // with (latex.ltx:498-514).
 type Params struct {
-	Tolerance   float64 // \tolerance: the worst badness ratio a line may have
+	Tolerance   float64 // \tolerance: the worst BADNESS a line may have (100·ratio³)
 	LinePenalty float64 // \linepenalty: charged once per line, so fewer lines cost less
 	AdjDemerits float64 // \adjdemerits: adjacent lines two fitness classes apart
 	DoubleHyph  float64 // \doublehyphendemerits: two hyphenated lines in a row
@@ -180,7 +180,11 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 			}
 			// A break is taken from a if the line is feasible, or if the break is
 			// forced (then even an over/underfull line must close the paragraph).
-			if (r >= -1 && r <= p.Tolerance) || forced {
+			// Feasible means BADNESS within tolerance, not the ratio (tex.web
+			// §16773, "if b>threshold then goto continue"): badness grows as the
+			// cube of the ratio, so \tolerance=200 admits a line stretched by about
+			// 1.26 of its stretchability and nothing looser.
+			if (r >= -1 && badness(r) <= p.Tolerance) || forced {
 				fit := fitness(r)
 				d := demerits(r, fit, penaltyAt(items, b), flaggedAt(items, b), a, items, b == n, p)
 				total := a.demerits + d
@@ -190,8 +194,19 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 			}
 		}
 		active = survivors
+		// Not every class earns a node. \adjdemerits is the most a worse class could
+		// ever save later, so a break already further behind than that can never be
+		// chosen in the end and is dropped here (tex.web §16476-16487) — which is
+		// also what stops the active list from growing fourfold.
+		lowest := math.Inf(1)
 		for _, nd := range bestHere {
-			if nd == nil {
+			if nd != nil && nd.demerits < lowest {
+				lowest = nd.demerits
+			}
+		}
+		limit := lowest + math.Abs(p.AdjDemerits)
+		for _, nd := range bestHere {
+			if nd == nil || nd.demerits > limit {
 				continue
 			}
 			active = append(active, nd)
