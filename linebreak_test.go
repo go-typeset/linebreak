@@ -36,8 +36,9 @@ func TestKnuthPlassEven(t *testing.T) {
 func TestKnuthPlassStretch(t *testing.T) {
 	// 5 words w=2, glue 1/2/0.5, line=10. First line = 3 words (natural 8, +2 over stretch 4
 	// → r=0.5); the last line carries \parfillskip. So the FIRST line must show r=0.5.
+	// The tolerance is a badness (LaTeX's \tolerance=200): r=0.5 is badness 12.5.
 	items := para(5, 2, 1, 2, 0.5)
-	lines, ok := KnuthPlass(items, 10, 5, 10)
+	lines, ok := KnuthPlass(items, 10, 200, 10)
 	if !ok || len(lines) < 2 {
 		t.Fatalf("ok=%v lines=%d want >=2", ok, len(lines))
 	}
@@ -48,9 +49,10 @@ func TestKnuthPlassStretch(t *testing.T) {
 
 func TestKnuthPlassShrink(t *testing.T) {
 	// 4 words w=3, glue 1/0.5/1, line=6. First line = 2 words: natural 3+1+3=7, over by 1,
-	// shrink available 1 → r=-1 (fully shrunk, still feasible).
+	// shrink available 1 → r=-1 (fully shrunk, still feasible: badness 100, under
+	// LaTeX's \tolerance=200).
 	items := para(4, 3, 1, 0.5, 1)
-	lines, ok := KnuthPlass(items, 6, 5, 10)
+	lines, ok := KnuthPlass(items, 6, 200, 10)
 	if !ok || len(lines) < 2 {
 		t.Fatalf("ok=%v lines=%d", ok, len(lines))
 	}
