@@ -140,9 +140,21 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 
 	// width/stretch/shrink of the line from break a to break b. Leading glue just
 	// after break a is discarded; a penalty break contributes its own width.
+	//
+	// ⛔⛔ a > 0, BECAUSE POSITION 0 IS NOT A BREAK. The active list is seeded with
+	// {position: 0}, the paragraph's beginning, and there is no "glue we broke at"
+	// there — tex.web:17001 says so in one line, `prev_p:=cur_p; {glue at beginning is
+	// not a legal breakpoint}`, and legal() above already refuses it. Discarding it
+	// anyway threw away a paragraph's opening glue: \noindent\hskip 20pt lost its
+	// 20pt, the reference starting that line at x=153.69 and go-tex at 133.77
+	// (go-tex/engine#657).
+	//
+	// The same test is made twice — here and where the lines are rebuilt — so both
+	// move together; fixing one would leave the Ratio measured on one span and the
+	// Start reported for another.
 	measure := func(a, b int) (w, y, z float64) {
 		start := a
-		if a < n && items[a].Kind == KGlue {
+		if a > 0 && a < n && items[a].Kind == KGlue {
 			start = a + 1 // discard the glue we broke at
 		}
 		w = sumW[b] - sumW[start]
@@ -223,8 +235,10 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 	var rev []Line
 	for nd := best; nd.prev != nil; nd = nd.prev {
 		w, y, z := measure(nd.prev.position, nd.position)
+		// ⛔ start > 0 for the reason written on measure: the paragraph's first line
+		// begins where the paragraph begins, glue and all.
 		start := nd.prev.position
-		if start < n && items[start].Kind == KGlue {
+		if start > 0 && start < n && items[start].Kind == KGlue {
 			start++
 		}
 		rev = append(rev, Line{Start: start, End: nd.position, Ratio: ratio(w, y, z, lineWidth)})
