@@ -83,6 +83,33 @@ type Params struct {
 	AdjDemerits float64 // \adjdemerits: adjacent lines two fitness classes apart
 	DoubleHyph  float64 // \doublehyphendemerits: two hyphenated lines in a row
 	FinalHyph   float64 // \finalhyphendemerits: a hyphen on the last line but one
+
+	// FinalPass turns on TeX's last resort: artificial_demerits.
+	//
+	// ⛔⛔ WITHOUT IT AN OVERFULL SINGLE LINE BEATS TWO INFEASIBLE SHORT ONES, and TeX
+	// chooses the other way. tex.web §16769-16771: the deactivation at an impossible
+	// line is guarded by "and |goto deactivate| UNLESS there is a reason to consider
+	// lines of text from |r| to |cur_p|", and the reason is
+	//
+	//	if final_pass and (minimum_demerits=awful_bad) and
+	//	   (link(r)=last_active) and (prev_r=active) then
+	//	  artificial_demerits:=true {set demerits zero, this break is forced}
+	//	else if b>threshold then goto deactivate;
+	//
+	// — when nothing feasible has been recorded at this breakpoint and r is the ONLY
+	// active node, the break is recorded at ZERO cost. Zero is what makes it win:
+	// badness past inf_bad costs 1e8 per line, so two hopeless lines (2e8) otherwise
+	// lose to one overfull line (1e8).
+	//
+	// Measured in go-tex/engine: two unbreakable 35pt words with a 3pt rigid space on
+	// a 40pt measure. Neither line can be set — each is 5pt short with nothing to
+	// stretch — and the reference puts them on TWO lines. Without this flag the
+	// breaker returned ONE line 33pt over the margin, because it cost half as much.
+	//
+	// It is the caller's business because the PASSES are: \pretolerance, then
+	// \tolerance, then the emergency pass. Only the last one may fall back, and only
+	// the caller knows which pass it is running.
+	FinalPass bool
 }
 
 // DefaultParams are LaTeX's own settings (latex.ltx:498-514): \tolerance=200,
@@ -172,6 +199,20 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 	active := []*breakNode{{position: 0, line: 0, fitness: decent}}
 	var best *breakNode
 
+	// paraEnd is where the paragraph's LAST line ends: the last forced penalty in the
+	// list, or n when there is none.
+	//
+	// ⛔ A paragraph is terminated by \parfillskip and a forced penalty (tex.web
+	// §16077-16084), so that penalty is the end. n is one PAST the final item, and a
+	// break there yields a line holding nothing but the terminator.
+	paraEnd := n
+	for i := n - 1; i >= 0; i-- {
+		if items[i].Kind == KPenalty && items[i].Penalty <= -InfPenalty {
+			paraEnd = i
+			break
+		}
+	}
+
 	for b := 1; b <= n; b++ {
 		if !legal(b) {
 			continue
@@ -182,12 +223,31 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 		// (§16480-16486): a line that is merely decent may be the wrong ancestor for
 		// the next one, and only keeping all four lets \adjdemerits decide.
 		var bestHere [4]*breakNode
+		// onlyActive mirrors TeX's "link(r)=last_active and prev_r=active": r is the
+		// one and only active node, so deactivating it loses the paragraph.
+		onlyActive := len(active) == 1
 		for _, a := range active {
 			w, y, z := measure(a.position, b)
 			r := ratio(w, y, z, lineWidth)
 			// A node stays active for *later* breaks only while the line to here is
 			// not already overfull past its shrink (r ≥ −1).
-			if r >= -1 {
+			//
+			// ⛔⛔ AND NEVER ACROSS A FORCED BREAK. tex.web §16769:
+			//
+			//	if (b>inf_bad)or(pi=eject_penalty) then
+			//	  @<Prepare to deactivate node~|r| …@>
+			//
+			// Every active node is deactivated at an eject_penalty, so no path reaches
+			// past it: the break is MANDATORY, not merely tolerated however badly the
+			// line fits. Keeping the survivors let a solution span the forced penalty
+			// and win on demerits at the end of the paragraph, where b == n is forced
+			// too — so \\ and \linebreak simply did not break.
+			//
+			// Measured in go-tex/engine, which splits a paragraph at forced penalties to
+			// work around this: with the split removed and this line as it was,
+			// `un deux\penalty-10000 trois quatre` came out on ONE line and the \hfil of
+			// a \\ stretched in the middle of it (onze at x=298.97 beside neuf dix).
+			if r >= -1 && !forced {
 				survivors = append(survivors, a)
 			}
 			// A break is taken from a if the line is feasible, or if the break is
@@ -196,9 +256,21 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 			// §16773, "if b>threshold then goto continue"): badness grows as the
 			// cube of the ratio, so \tolerance=200 admits a line stretched by about
 			// 1.26 of its stretchability and nothing looser.
-			if (r >= -1 && badness(r) <= p.Tolerance) || forced {
+			// ⛔ artificial: TeX's last resort, see Params.FinalPass. On the final pass,
+			// when NOTHING feasible has been recorded at this breakpoint and a is the
+			// only active node, the break is recorded at ZERO cost instead of the node
+			// being deactivated (tex.web §16769-16771). Zero is the point: a hopeless
+			// line otherwise costs 1e8, so two of them lose to one overfull line.
+			artificial := p.FinalPass && onlyActive &&
+				bestHere[0] == nil && bestHere[1] == nil && bestHere[2] == nil && bestHere[3] == nil
+			if (r >= -1 && badness(r) <= p.Tolerance) || forced || artificial {
 				fit := fitness(r)
-				d := demerits(r, fit, penaltyAt(items, b), flaggedAt(items, b), a, items, b == n, p)
+				var d float64
+				if artificial && !(r >= -1 && badness(r) <= p.Tolerance) && !forced {
+					d = 0 // artificial_demerits
+				} else {
+					d = demerits(r, fit, penaltyAt(items, b), flaggedAt(items, b), a, items, b == n, p)
+				}
 				total := a.demerits + d
 				if cur := bestHere[fit]; cur == nil || total < cur.demerits {
 					bestHere[fit] = &breakNode{position: b, line: a.line + 1, fitness: fit, demerits: total, prev: a}
@@ -222,7 +294,26 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 				continue
 			}
 			active = append(active, nd)
-			if forced && (best == nil || nd.demerits < best.demerits) {
+			// ⛔⛔ THE PARAGRAPH'S LAST LINE ENDS AT b == n, NOT AT ANY FORCED BREAK.
+			//
+			// This read `if forced && …`, and a forced penalty in the MIDDLE of the
+			// paragraph is forced too — so such a node could become the paragraph's
+			// final node and everything after it was silently dropped. It did not bite
+			// while a path was allowed to span the forced break and reach b == n with
+			// lower demerits; closing that path (see the survivors above, tex.web
+			// §16769) exposed it at once: a four-word fixture with a forced penalty in
+			// the middle came back as ONE line ending at the penalty, the last two
+			// words gone.
+			//
+			// tex.web §16054-16064: line_break finishes by following the active node
+			// reached when cur_p is null — the end of the LIST. A break inside the
+			// paragraph is an ancestor of that node, never a substitute for it.
+			//
+			// ⛔ And the end is `paraEnd`, the LAST forced penalty, not n. n is one past
+			// the final item: choosing it adds an empty last line holding nothing but
+			// the \parfillskip and the terminating penalty. Every existing test grew
+			// exactly one such line when this said `b == n`.
+			if b == paraEnd && (best == nil || nd.demerits < best.demerits) {
 				best = nd
 			}
 		}
@@ -271,7 +362,22 @@ func ratio(w, y, z, L float64) float64 {
 		return (L - w) / y
 	case w > L:
 		if z <= 0 {
-			return math.Inf(1) // cannot shrink at all → treat as impossibly bad
+			// ⛔⛔ NEGATIVE infinity. This returned +Inf — "impossibly bad", which is
+			// true, but on the WRONG SIDE OF THE SCALE. Every caller asks `r >= -1` to
+			// mean "this line is not overfull past its shrink", and +Inf passes that
+			// test: an unshrinkable overfull line read as an infinitely STRETCHED one,
+			// so its node stayed active and could still be chosen.
+			//
+			// tex.web §16767-16769 puts it the other way round: shrinking past the
+			// available shrink gives b := inf_bad+1, and `if (b>inf_bad)…` then
+			// deactivates the node. Overfull means out, not loose.
+			//
+			// Measured in go-tex/engine: `aaaaaaa bbbbbbb` at 73pt natural on a 40pt
+			// measure came back as ONE line of ratio +Inf — 33pt over the margin,
+			// reported as a decent line because the \parfillskip's infinite stretch
+			// was read as covering it. badness() answers InfPenalty for either sign,
+			// so the cost was right all along; only the sign of the ratio was wrong.
+			return math.Inf(-1)
 		}
 		return (L - w) / z // negative
 	default:

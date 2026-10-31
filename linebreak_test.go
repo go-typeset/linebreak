@@ -13,8 +13,37 @@ func para(nwords int, wordW, glueW, st, sh float64) []Item {
 			it = append(it, Glue(glueW, st, sh))
 		}
 	}
-	it = append(it, Glue(0, 1e6, 0))                // finishing glue fills the last line
-	it = append(it, Penalty(0, -InfPenalty, false)) // forced break at end
+	return withTerminator(it)
+}
+
+// withTerminator closes a paragraph the way TeX does, tex.web §16077-16084:
+//
+//	if is_char_node(tail) then tail_append(new_penalty(inf_penalty))
+//	else if type(tail)<>glue_node then tail_append(new_penalty(inf_penalty))
+//	else begin type(tail):=penalty_node; … penalty(tail):=inf_penalty; end;
+//	link(tail):=new_param_glue(par_fill_skip_code);
+//
+// ⛔⛔ THE INFINITE PENALTY IN FRONT OF \parfillskip IS NOT DECORATION, AND THESE
+// FIXTURES WERE BUILT WITHOUT IT. §16066-16071 says why in its own words: the
+// \parfillskip "is preceded by an infinite penalty, so it will never be considered as
+// a potential breakpoint". Omitted, the finishing glue IS a legal breakpoint — a glue
+// after a box — so every fixture here offered the breaker one breakpoint TeX never
+// offers, right at the end of the paragraph.
+//
+// It mattered: TestKnuthPlassInfeasible's single unbreakable box had its only "legal"
+// break at that glue. The paragraph TeX builds there has exactly ONE breakpoint, the
+// forced end, and yields one overfull line; the fixture's had two.
+//
+// The trailing forced penalty stays: TeX's line_break ends the last line by running
+// out of list, and this breaker wants the end named.
+func withTerminator(it []Item) []Item {
+	if n := len(it); n > 0 && it[n-1].Kind == KGlue {
+		it[n-1] = Penalty(0, InfPenalty, false) // a trailing glue is REPLACED
+	} else {
+		it = append(it, Penalty(0, InfPenalty, false))
+	}
+	it = append(it, Glue(0, 1e6, 0))                // \parfillskip
+	it = append(it, Penalty(0, -InfPenalty, false)) // end of paragraph
 	return it
 }
 func TestKnuthPlassEven(t *testing.T) {
@@ -63,7 +92,11 @@ func TestKnuthPlassShrink(t *testing.T) {
 func TestKnuthPlassInfeasible(t *testing.T) {
 	// A single unbreakable box far wider than the line, tolerance 5 → no feasible breaking
 	// except the forced end (which is then overfull); KnuthPlass still returns the forced line.
-	items := []Item{Box(100), Glue(0, 1e6, 0), Penalty(0, -InfPenalty, false)}
+	// ⛔ Through withTerminator, so the \parfillskip carries the infinite penalty TeX
+	// puts in front of it. Written by hand without it, the finishing glue was a legal
+	// breakpoint and this paragraph had TWO — where TeX's has exactly one, the forced
+	// end, and sets the box as a single overfull line.
+	items := withTerminator([]Item{Box(100)})
 	lines, ok := KnuthPlass(items, 10, 5, 10)
 	if !ok || len(lines) != 1 {
 		t.Fatalf("forced-end: ok=%v lines=%d", ok, len(lines))
