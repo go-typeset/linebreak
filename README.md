@@ -35,6 +35,15 @@ items := []linebreak.Item{
     linebreak.Box(30),                  // a word, 30 units wide
     linebreak.Glue(10, 5, 3),           // a space: 10 wide, may stretch 5, shrink 3
     linebreak.Box(45),
+    // End a paragraph the way TeX does (tex.web §16077-16084): an INFINITE penalty,
+    // then the finishing glue, then the forced break. The infinite penalty is not
+    // decoration — §16070 says the \parfillskip "is preceded by an infinite penalty,
+    // so it will never be considered as a potential breakpoint". Leave it out and that
+    // glue IS a legal breakpoint (a glue after a box), which offers one break TeX never
+    // offers, right at the end. A trailing glue should be REPLACED by the penalty
+    // rather than kept, since "spaces usually precede blank lines" (§16068).
+    linebreak.Penalty(0, linebreak.InfPenalty, false),
+    linebreak.Glue(0, 1e6, 0),
     linebreak.Penalty(0, -linebreak.InfPenalty, false), // forced break: end of paragraph
 }
 
@@ -53,6 +62,25 @@ callers that draw what they measure.
 
 **Units are yours.** The algorithm never looks at what a width means — points,
 pixels, ems or terminal columns all work, as long as one paragraph is consistent.
+
+**A forced break is mandatory.** A `Penalty` of `−InfPenalty` is not a strong
+preference: every active node is deactivated there (tex.web §16769), so no line spans
+it. The paragraph's last line ends at the **last** forced penalty in the list.
+
+**An overfull line's ratio is negative.** `Ratio` below −1 means the line is longer than
+the measure by more than its shrink can absorb, and `−Inf` means it cannot shrink at
+all. The sign is the contract: `r >= -1` is the test for "this line can be set", and an
+unshrinkable overfull line must fail it. An underfull line with nothing to stretch is
+`MaxBadRatio`, deliberately **finite** — TeX gives it `b := inf_bad`, which does not
+exceed `inf_bad`, so such a line is bad but still usable.
+
+**`Params.FinalPass`** arms TeX's `artificial_demerits` (§16824-16831): at a breakpoint
+where nothing feasible was recorded and only one node is active, the break is taken at
+**zero** cost instead of the node being deactivated. That is what makes TeX prefer two
+hopeless short lines to one overfull line. ⛔ Set it only on a genuine *final* pass,
+after the earlier passes failed, and keep the tolerance as it was — raising the
+tolerance makes a hopeless line feasible at its full cost, which defeats the clause.
+A caller that arms it on every pass will see breaks TeX never takes.
 
 ## Tests
 
