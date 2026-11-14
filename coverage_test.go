@@ -56,9 +56,9 @@ func TestPenaltySignMovesDemerits(t *testing.T) {
 	a := breakNode{fitness: decent}
 	items := []Item{Box(1)}
 	pr := DefaultParams(200, 10)
-	neutral := demerits(0, decent, 0, false, &a, items, false, pr)
-	discouraged := demerits(0, decent, 50, false, &a, items, false, pr)
-	encouraged := demerits(0, decent, -50, false, &a, items, false, pr)
+	neutral := demerits(0, OrderPt, decent, 0, false, &a, items, false, pr)
+	discouraged := demerits(0, OrderPt, decent, 50, false, &a, items, false, pr)
+	encouraged := demerits(0, OrderPt, decent, -50, false, &a, items, false, pr)
 	if !(discouraged > neutral) {
 		t.Errorf("a positive penalty did not cost more: %v vs %v", discouraged, neutral)
 	}
@@ -74,8 +74,8 @@ func TestConsecutiveFlaggedBreaksArePenalised(t *testing.T) {
 	afterFlagged := &breakNode{position: 1, fitness: decent}
 	afterBox := &breakNode{position: 0, fitness: decent}
 	pr := DefaultParams(200, 10)
-	with := demerits(0, decent, 50, true, afterFlagged, items, false, pr)
-	without := demerits(0, decent, 50, true, afterBox, items, false, pr)
+	with := demerits(0, OrderPt, decent, 50, true, afterFlagged, items, false, pr)
+	without := demerits(0, OrderPt, decent, 50, true, afterBox, items, false, pr)
 	if with-without != 10000 {
 		t.Errorf("consecutive flagged penalty = %v, want 10000", with-without)
 	}
@@ -99,7 +99,7 @@ func TestFitnessClasses(t *testing.T) {
 		{"lâche", 0.8, loose},
 		{"très lâche", 1.5, veryLoose},
 	} {
-		if got := fitness(c.r); got != c.want {
+		if got := fitness(c.r, OrderPt); got != c.want {
 			t.Errorf("fitness(%v) [%s] = %d, want %d", c.r, c.nom, got, c.want)
 		}
 	}
@@ -113,8 +113,8 @@ func TestAdjacentIncompatibleLinesCost(t *testing.T) {
 	fromLoose := &breakNode{fitness: loose}
 	// A very loose line after a tight one is three classes away; after a loose
 	// one, one class.
-	far := demerits(1.5, veryLoose, 0, false, fromTight, items, false, pr)
-	near := demerits(1.5, veryLoose, 0, false, fromLoose, items, false, pr)
+	far := demerits(1.5, OrderPt, veryLoose, 0, false, fromTight, items, false, pr)
+	near := demerits(1.5, OrderPt, veryLoose, 0, false, fromLoose, items, false, pr)
 	if far-near != pr.AdjDemerits {
 		t.Errorf("écart de classes: %v de plus, want %v", far-near, pr.AdjDemerits)
 	}
@@ -127,8 +127,8 @@ func TestFinalHyphenCostsLessThanADoubleOne(t *testing.T) {
 	pr := DefaultParams(200, 10)
 	items := []Item{Box(1), Penalty(0, 50, true), Box(1)}
 	after := &breakNode{position: 1, fitness: decent}
-	mid := demerits(0, decent, 50, true, after, items, false, pr)
-	end := demerits(0, decent, 50, true, after, items, true, pr)
+	mid := demerits(0, OrderPt, decent, 50, true, after, items, false, pr)
+	end := demerits(0, OrderPt, decent, 50, true, after, items, true, pr)
 	if mid-end != pr.DoubleHyph-pr.FinalHyph {
 		t.Errorf("dernière ligne: %v de moins, want %v", mid-end, pr.DoubleHyph-pr.FinalHyph)
 	}
@@ -140,7 +140,7 @@ func TestHopelessLineHitsTheCeiling(t *testing.T) {
 	pr := DefaultParams(MaxBadRatio, 10)
 	items := []Item{Box(1)}
 	a := &breakNode{fitness: decent}
-	if got := demerits(MaxBadRatio, veryLoose, 0, false, a, items, false, pr); got < 1e8 {
+	if got := demerits(MaxBadRatio, OrderPt, veryLoose, 0, false, a, items, false, pr); got < 1e8 {
 		t.Errorf("ligne désespérée = %v, want au moins le plafond 1e8", got)
 	}
 }
