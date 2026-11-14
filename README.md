@@ -83,7 +83,7 @@ else begin prev_r:=r; if b>threshold then goto continue; … end;
 
 `goto deactivate` **skips the recording**. A forced break whose line is past the
 tolerance is therefore not taken, and a pass that has no other break *fails* — which is
-how TeX reaches its next pass. Until v1.3.0 this package recorded every forced break
+how TeX reaches its next pass. Up to v1.3.0 this package recorded every forced break
 however badly its line fitted, so such a pass returned `ok` with a bad line in it and a
 caller had to inspect the lines to find out. ⛔ **A caller that relied on that must now
 run the next pass**, which is what tex.web does and what the parameters are for.
@@ -124,7 +124,7 @@ caller that keeps `FinalPass` for a pass it never runs has no final pass at all.
 ⚠ **What the clause does is permit an overfull line, not prefer short ones.** On both
 fixtures in `finalpass_test.go`, tectonic 0.17.0 sets **one overfull line** rather than
 breaking: 33.0pt too wide on the first, 21.5pt on the second. The README said the
-opposite until v1.3.0, on an argument from demerits that was never put to the
+opposite up to v1.3.0, on an argument from demerits that was never put to the
 reference.
 
 ## Tests
