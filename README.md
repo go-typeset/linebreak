@@ -43,7 +43,10 @@ items := []linebreak.Item{
     // offers, right at the end. A trailing glue should be REPLACED by the penalty
     // rather than kept, since "spaces usually precede blank lines" (§16068).
     linebreak.Penalty(0, linebreak.InfPenalty, false),
-    linebreak.Glue(0, 1e6, 0),
+    // \parfillskip = 0pt plus 1fil. Since v1.5.0 say `fil` and mean it:
+    // GlueOrder(0, 1, linebreak.OrderFil, 0). `Glue(0, 1e6, 0)` still works and
+    // is still a large FINITE stretch, which is not the same thing — see below.
+    linebreak.GlueOrder(0, 1, linebreak.OrderFil, 0),
     linebreak.Penalty(0, -linebreak.InfPenalty, false), // forced break: end of paragraph
 }
 
@@ -62,6 +65,59 @@ callers that draw what they measure.
 
 **Units are yours.** The algorithm never looks at what a width means — points,
 pixels, ems or terminal columns all work, as long as one paragraph is consistent.
+
+## Glue orders, and the background every line carries (v1.5.0)
+
+TeX keeps stretch in four separate columns — points, `fil`, `fill`, `filll`
+(tex.web §16781-16782) — and `Item.StretchOrder` now says which one a glue is
+in. `GlueOrder(w, stretch, order, shrink)` is the constructor; `Glue` is order
+`OrderPt`, so nothing written before this changes.
+
+⛔ **An order is a class, not a large number.** Any amount of `fil` beats every
+amount of points, and §16790-16793 is unconditional about what that does to a
+line:
+
+```pascal
+if (cur_active_width[3]<>0)or(cur_active_width[4]<>0)or(cur_active_width[5]<>0)
+  then begin b:=0; fit_class:=decent_fit; {infinite stretch} end
+else … b:=badness(shortfall,cur_active_width[2]) …
+```
+
+No badness is computed at all: a line carrying any infinite stretch is
+**perfect**, however short it is, and therefore feasible at every tolerance —
+including `0`. Flattening `plus 1fil` into the finite column instead gives a
+large but finite badness, so a line TeX calls perfect comes out merely
+tolerable. That was this package's item (1) in #12, and the visible cost was in
+its consumer: under `\raggedright` the first pass failed and a paragraph came
+out with the hyphens of a justified one.
+
+⚠ **Shrink has no orders**, and that is tex.web's own sentence (§16806):
+"Shrinkability is never infinite in a paragraph". `fil` can only pull a line
+wider, so an overfull line reports `OrderPt` and a negative `Ratio` whatever
+infinite stretch it also carries.
+
+**`Params.Background` is `\leftskip` + `\rightskip`**, added to **every** line
+before its own material, exactly as §16307-16315 seeds `active_width`:
+
+```go
+p := linebreak.DefaultParams(200, 10)
+p.Background.Stretch[linebreak.OrderFil] = 1   // \raggedright
+p.Background.Width = 20                        // a 20-wide \leftskip narrows every line
+```
+
+That is what makes `\raggedright` work rather than merely look right: with
+`\rightskip = 0pt plus 1fil` every line has badness 0, so TeX's **first** pass —
+which has no hyphenation at all — succeeds and no word is ever broken. A caller
+that breaks the paragraph justified and adds the skips afterwards gets ragged
+glue painted over justified breaks.
+
+⚠ **`Line.Ratio` is read together with `Line.StretchOrder`.** The order is the
+highest one present on that line, and it alone takes up the slack. `Ratio = 0.3`
+at `OrderPt` means "stretch every glue by 0.3 of its stretch"; at `OrderFil` it
+means "stretch the fil glues by 0.3 of their fil and leave every finite glue at
+its natural width". Distributing it over all the glues would spread a
+`\raggedright` line's slack through its interword spaces — the one thing
+`\raggedright` exists to prevent.
 
 **A forced break is mandatory.** A `Penalty` of `−InfPenalty` is not a strong
 preference: every active node is deactivated there (tex.web §16769), so no line spans

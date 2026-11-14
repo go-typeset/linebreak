@@ -43,7 +43,14 @@ func TestRatioSignsSayOverfullFromLoose(t *testing.T) {
 		{"trop court, étirable", 5, 10, 0, 10, 1, true},
 		{"juste", 10, 1, 1, 10, 0, true},
 	} {
-		r := ratio(c.w, c.y, c.z, c.L)
+		// ⚠ Every case here is FINITE glue, so the stretch goes in column 0 and
+		// the order comes back OrderPt. The infinite orders have their own tests:
+		// what this one is about is the SIGN, which no order changes.
+		r, order := ratio(c.w, [numOrders]float64{c.y}, c.z, c.L)
+		if order != OrderPt {
+			t.Errorf("%s: ordre %d, want OrderPt — ce cas n'a que du ressort fini",
+				c.name, order)
+		}
 		var sign int
 		switch {
 		case r < 0:
