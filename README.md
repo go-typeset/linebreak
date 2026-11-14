@@ -67,6 +67,31 @@ pixels, ems or terminal columns all work, as long as one paragraph is consistent
 preference: every active node is deactivated there (tex.web §16769), so no line spans
 it. The paragraph's last line ends at the **last** forced penalty in the list.
 
+**But mandatory is not unconditional, and a pass can fail at one.** tex.web §16769
+reads, in full:
+
+```pascal
+if (b>inf_bad)or(pi=eject_penalty) then
+  begin if final_pass and (minimum_demerits=awful_bad) and
+     (link(r)=last_active) and (prev_r=active) then
+    artificial_demerits:=true
+  else if b>threshold then goto deactivate;
+  node_r_stays_active:=false;
+  end
+else begin prev_r:=r; if b>threshold then goto continue; … end;
+```
+
+`goto deactivate` **skips the recording**. A forced break whose line is past the
+tolerance is therefore not taken, and a pass that has no other break *fails* — which is
+how TeX reaches its next pass. Until v1.3.0 this package recorded every forced break
+however badly its line fitted, so such a pass returned `ok` with a bad line in it and a
+caller had to inspect the lines to find out. ⛔ **A caller that relied on that must now
+run the next pass**, which is what tex.web does and what the parameters are for.
+
+A line a `\\` ends carries `\hfil` (LaTeX's `\\` is `\unskip \nobreak \hfil \break`), so
+in real input a forced break's line is feasible at any tolerance. Emit that glue: a
+forced penalty after rigid material is input TeX would not set either.
+
 **An overfull line's ratio is negative.** `Ratio` below −1 means the line is longer than
 the measure by more than its shrink can absorb, and `−Inf` means it cannot shrink at
 all. The sign is the contract: `r >= -1` is the test for "this line can be set", and an
@@ -74,13 +99,33 @@ unshrinkable overfull line must fail it. An underfull line with nothing to stret
 `MaxBadRatio`, deliberately **finite** — TeX gives it `b := inf_bad`, which does not
 exceed `inf_bad`, so such a line is bad but still usable.
 
-**`Params.FinalPass`** arms TeX's `artificial_demerits` (§16824-16831): at a breakpoint
-where nothing feasible was recorded and only one node is active, the break is taken at
-**zero** cost instead of the node being deactivated. That is what makes TeX prefer two
-hopeless short lines to one overfull line. ⛔ Set it only on a genuine *final* pass,
-after the earlier passes failed, and keep the tolerance as it was — raising the
-tolerance makes a hopeless line feasible at its full cost, which defeats the clause.
-A caller that arms it on every pass will see breaks TeX never takes.
+**`Params.FinalPass`** arms TeX's `artificial_demerits` (§16824-16831): the break is
+taken at **zero** cost instead of the node being deactivated, when all four of these
+hold — and the first is the one that is easy to drop:
+
+1. the line is **hopeless or the break is forced** (`b > inf_bad`, here `Ratio < −1`, or
+   `pi = eject_penalty`). The clause lives *inside* that branch. At an ordinary
+   breakpoint merely past the tolerance tex.web says `goto continue`: do not record,
+   keep the node active;
+2. nothing feasible has been recorded at this breakpoint;
+3. it is the only active node;
+4. `FinalPass` is set.
+
+⛔ **Set it only on a genuine *final* pass**, after the earlier passes failed, and keep
+the tolerance as it was — raising the tolerance makes a hopeless line feasible at its
+full cost, which defeats the clause. A caller that arms it on every pass, or that drops
+condition (1), will see breaks TeX never takes.
+
+⚠ **And "final" may be the second pass.** tex.web §863 sets
+`final_pass := (emergency_stretch <= 0)` when it enters the second pass: with no
+`\emergencystretch` there is no third pass and the clause is live on the second. A
+caller that keeps `FinalPass` for a pass it never runs has no final pass at all.
+
+⚠ **What the clause does is permit an overfull line, not prefer short ones.** On both
+fixtures in `finalpass_test.go`, tectonic 0.17.0 sets **one overfull line** rather than
+breaking: 33.0pt too wide on the first, 21.5pt on the second. The README said the
+opposite until v1.3.0, on an argument from demerits that was never put to the
+reference.
 
 ## Tests
 

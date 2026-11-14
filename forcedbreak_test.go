@@ -28,9 +28,20 @@ import (
 // the optimiser has every reason to keep them together, so a pass here means the break
 // was taken because it is forced and not because it was convenient. A fixture whose
 // words did not fit would break there anyway and the test would prove nothing.
+//
+// ⛔⛔ AND THE FIL BEFORE THE PENALTY IS NOT DECORATION — it is what LaTeX writes.
+// `\\` is `\unskip \nobreak \hfil \break` (latex.ltx), so the line a forced break ends
+// carries INFINITE stretch and is feasible at any tolerance. The fixture had no fil,
+// which made its first line 5 wide on a measure of 100 with a stretch of 1: badness
+// far past \tolerance=200. That passed only while this package recorded every forced
+// break whatever its badness, which tex.web §16769 does not do ("else if b>threshold
+// then goto deactivate"). With that corrected the fixture had to become the shape a
+// consumer actually emits, or it would be testing the breaker on input no document
+// produces.
 func TestAForcedBreakIsTakenEvenWhenEverythingFits(t *testing.T) {
 	items := withTerminator([]Item{
 		Box(2), Glue(1, 1, 0.5), Box(2),
+		Glue(0, 1e6, 0),                // the \hfil of LaTeX's \\
 		Penalty(0, -InfPenalty, false), // the forced break, mid-paragraph
 		Glue(1, 1, 0.5), Box(2), Glue(1, 1, 0.5), Box(2),
 	})
@@ -42,12 +53,12 @@ func TestAForcedBreakIsTakenEvenWhenEverythingFits(t *testing.T) {
 		t.Fatalf("lines=%d want 2: la pénalité forcée au milieu n'a pas coupé, "+
 			"tout a tenu sur une ligne — %+v", len(lines), lines)
 	}
-	// The first line ends AT the forced penalty: item 3.
-	if lines[0].End != 3 {
-		t.Errorf("première ligne finit à %d, want 3 (la pénalité forcée)", lines[0].End)
+	// The first line ends AT the forced penalty: item 4.
+	if lines[0].End != 4 {
+		t.Errorf("première ligne finit à %d, want 4 (la pénalité forcée)", lines[0].End)
 	}
-	// ⛔ And it is JUSTIFIED: the line is 4 wide against a measure of 100, with one
-	// glue of stretch 1, so the ratio is large and positive. This is the half the
+	// ⛔ And it is JUSTIFIED: the line is 5 wide against a measure of 100 and the fil
+	// takes up the slack, so the ratio is positive and finite. This is the half the
 	// engine could not get while a per-fragment \parfillskip absorbed the slack —
 	// a ratio of 0 here would mean the line was set at its natural width.
 	if lines[0].Ratio <= 0 || math.IsInf(lines[0].Ratio, 0) {
@@ -100,11 +111,16 @@ func TestAForbiddingPenaltyIsNotAForcedBreak(t *testing.T) {
 // must still leave the node created AT the forced break itself, or a second forced
 // penalty immediately after the first would find nothing active and the breaking would
 // fail outright.
+// ⛔ Each forced break is preceded by its fil, for the reason written on the test
+// above: a line that a `\\` ends carries \hfil, and a forced break whose line is past
+// the threshold is now deactivated rather than recorded (tex.web §16769).
 func TestTwoForcedBreaksInARow(t *testing.T) {
 	items := withTerminator([]Item{
 		Box(2),
+		Glue(0, 1e6, 0),
 		Penalty(0, -InfPenalty, false),
 		Box(2),
+		Glue(0, 1e6, 0),
 		Penalty(0, -InfPenalty, false),
 		Box(2),
 	})
