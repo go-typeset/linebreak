@@ -90,15 +90,29 @@ func TestKnuthPlassShrink(t *testing.T) {
 	}
 }
 func TestKnuthPlassInfeasible(t *testing.T) {
-	// A single unbreakable box far wider than the line, tolerance 5 → no feasible breaking
-	// except the forced end (which is then overfull); KnuthPlass still returns the forced line.
+	// A single unbreakable box far wider than the line, tolerance 5 → no feasible
+	// breaking at all. TeX sets it as one overfull line, and reaches that answer
+	// through artificial_demerits on its FINAL pass (tex.web §16824-16831), not by
+	// recording the overfull forced break on an ordinary one.
+	//
+	// ⛔ SO THE TWO PASSES ANSWER DIFFERENTLY, and both answers are asserted. This
+	// read `KnuthPlass(…)` and expected the single line from a pass with no FinalPass
+	// — which is what §16769's "else if b>threshold then goto deactivate" forbids
+	// (go-typeset/linebreak#12 item 5). A pass that cannot do it must say so.
+	//
 	// ⛔ Through withTerminator, so the \parfillskip carries the infinite penalty TeX
 	// puts in front of it. Written by hand without it, the finishing glue was a legal
 	// breakpoint and this paragraph had TWO — where TeX's has exactly one, the forced
 	// end, and sets the box as a single overfull line.
 	items := withTerminator([]Item{Box(100)})
-	lines, ok := KnuthPlass(items, 10, 5, 10)
+	p := DefaultParams(5, 10)
+	if lines, ok := KnuthPlassWith(items, 10, p); ok {
+		t.Errorf("sans FinalPass: ok=true, %d ligne(s) — rien n'est recevable ici: %+v",
+			len(lines), lines)
+	}
+	p.FinalPass = true
+	lines, ok := KnuthPlassWith(items, 10, p)
 	if !ok || len(lines) != 1 {
-		t.Fatalf("forced-end: ok=%v lines=%d", ok, len(lines))
+		t.Fatalf("avec FinalPass: ok=%v lines=%d want 1", ok, len(lines))
 	}
 }

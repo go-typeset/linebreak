@@ -256,17 +256,51 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 			// §16773, "if b>threshold then goto continue"): badness grows as the
 			// cube of the ratio, so \tolerance=200 admits a line stretched by about
 			// 1.26 of its stretchability and nothing looser.
-			// ⛔ artificial: TeX's last resort, see Params.FinalPass. On the final pass,
-			// when NOTHING feasible has been recorded at this breakpoint and a is the
-			// only active node, the break is recorded at ZERO cost instead of the node
-			// being deactivated (tex.web §16769-16771). Zero is the point: a hopeless
-			// line otherwise costs 1e8, so two of them lose to one overfull line.
-			artificial := p.FinalPass && onlyActive &&
+			// feasible is tex.web's "b<=threshold": the line's BADNESS is within
+			// tolerance. A line overfull past its shrink has b=awful_bad, which no
+			// threshold admits, and that is the r < -1 half.
+			feasible := r >= -1 && badness(r) <= p.Tolerance
+			// ⛔⛔ TEX'S LAST RESORT IS INSIDE ONE BRANCH, AND THAT BRANCH IS THE WHOLE
+			// RULE. tex.web §16769-16775, the three sentences in their own order:
+			//
+			//	if (b>inf_bad)or(pi=eject_penalty) then
+			//	  begin if final_pass and (minimum_demerits=awful_bad) and
+			//	     (link(r)=last_active) and (prev_r=active) then
+			//	    artificial_demerits:=true {set demerits zero, this break is forced}
+			//	  else if b>threshold then goto deactivate;
+			//	  node_r_stays_active:=false;
+			//	  end
+			//	else begin prev_r:=r;
+			//	  if b>threshold then goto continue;
+			//	  node_r_stays_active:=true;
+			//	  end;
+			//
+			// Two things follow, and this code had neither.
+			//
+			// ⛔ (a) A FORCED BREAK PAST THE THRESHOLD IS NOT RECORDED — `goto deactivate`
+			// skips the recording entirely. The condition read `… || forced || …`, so
+			// every forced break was recorded however badly its line fitted
+			// (go-typeset/linebreak#12 item 5). A pass that cannot set the paragraph
+			// within \tolerance must FAIL and let the caller run the next one; recording
+			// the bad break made it succeed with a bad line instead, which is why
+			// go-tex/engine has had to test for bad lines in a pass that reported ok.
+			//
+			// ⛔ (b) THE ARTIFICIAL CLAUSE IS REACHED ONLY WHEN THE LINE IS HOPELESS OR
+			// THE BREAK IS FORCED. It sat outside the branch, so on a final pass it also
+			// fired at an ordinary breakpoint whose line was merely past the threshold
+			// (b>threshold, b<=inf_bad) — where TeX says `goto continue`: do not record,
+			// keep the node active. Recording those at ZERO cost makes them beat every
+			// real break, which is what arming FinalPass in go-tex/engine looked like
+			// when it hyphenated eleven titles into "THETI-TLE".
+			//
+			// desperate is that branch's own test: b>inf_bad, or pi=eject_penalty.
+			desperate := r < -1 || forced
+			artificial := p.FinalPass && desperate && onlyActive &&
 				bestHere[0] == nil && bestHere[1] == nil && bestHere[2] == nil && bestHere[3] == nil
-			if (r >= -1 && badness(r) <= p.Tolerance) || forced || artificial {
+			if feasible || artificial {
 				fit := fitness(r)
 				var d float64
-				if artificial && !(r >= -1 && badness(r) <= p.Tolerance) && !forced {
+				if artificial && !feasible {
 					d = 0 // artificial_demerits
 				} else {
 					d = demerits(r, fit, penaltyAt(items, b), flaggedAt(items, b), a, items, b == n, p)
