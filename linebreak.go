@@ -254,7 +254,29 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 	}
 	sumZ := make([]float64, n+1)
 	for i, it := range items {
-		sumW[i+1] = sumW[i] + it.Width
+		sumW[i+1] = sumW[i]
+		// ⛔⛔ A PENALTY'S WIDTH IS NOT PART OF THE RUNNING TOTAL. It is tex.web's
+		// disc_width, and :17128-17137 adds it for ONE try_break and takes it back:
+		//
+		//	act_width:=act_width+disc_width;
+		//	try_break(hyphen_penalty,hyphenated);
+		//	act_width:=act_width-disc_width;
+		//
+		// so a discretionary's pre-break material — the hyphen — is charged to the
+		// line that BREAKS there and to no other. measure() below adds it at the
+		// break, which was already right; putting it in the prefix sums as well
+		// charged it to every line that merely SPANS the hyphenation point.
+		//
+		// That is go-typeset/linebreak#12 item (2), and the consumer had written the
+		// consequence into its own source rather than hide it: go-tex/engine passes
+		// Penalty(0, …) for every discretionary, with a comment explaining that a
+		// real width "would inflate every line holding an unbroken hyphenation
+		// point". The cost of that workaround is the other half: the line that DOES
+		// break at a hyphen is then measured without the hyphen it will carry —
+		// about 2.5pt at 10pt, on a 45pt measure.
+		if it.Kind != KPenalty {
+			sumW[i+1] += it.Width
+		}
 		for o := range sumY {
 			sumY[o][i+1] = sumY[o][i]
 		}
