@@ -192,6 +192,28 @@ type Params struct {
 	// the caller knows which pass it is running.
 	FinalPass bool
 
+	// EmergencyStretch is \emergencystretch: extra FINITE stretch given to every
+	// line, and only on the final pass (tex.web §863 adds it to background[2],
+	// the finite slot, when that pass is entered).
+	//
+	// ⛔⛔ IT IS NOT A LOOSER TOLERANCE, AND SUBSTITUTING ONE IS A DIFFERENT
+	// ALGORITHM. A consumer without this knob raises \tolerance instead — go-tex's
+	// paragraph.go:251-258 sets it to its maximum — which ACCEPTS arbitrarily bad
+	// lines at the original glue. This makes the lines GOOD instead: the same
+	// paragraph that was infeasible at ratio 5 (badness 12500) is set at ratio 1
+	// (badness 100) once the stretch is actually there. Both "succeed"; they
+	// choose different breaks and charge different demerits, because badness is
+	// cubic in the ratio and the ratio is what changed.
+	//
+	// ⚠ FINITE, order 0, deliberately. Infinite stretch would make every line
+	// badness 0 (§16790-16793) and the emergency pass would stop discriminating
+	// between breaks at all — which is \raggedright, not an emergency pass.
+	//
+	// It is added once per line rather than as an item because that is what a
+	// background is: §16307-16315 seeds active_width with it before any item is
+	// walked. A caller running the first two passes leaves this zero.
+	EmergencyStretch float64
+
 	// Background is what every line carries before its own material: TeX's
 	// \leftskip and \rightskip, which are added to EVERY line rather than
 	// appearing in the item list (tex.web §16307-16315, verbatim):
@@ -323,16 +345,24 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 	// ⚠ AND THE BACKGROUND IS ADDED HERE, once per line, because that is what
 	// it is: §16307-16315 seeds active_width with it before any item is walked,
 	// so every line's totals start from it rather than from zero.
+	// §863: entering the emergency pass adds \emergencystretch to background[2],
+	// the FINITE stretch slot — so it is folded in here, once, rather than tested
+	// per line. A caller not on the final pass leaves EmergencyStretch zero and
+	// this is p.Background unchanged.
+	bg := p.Background
+	if p.FinalPass {
+		bg.Stretch[0] += p.EmergencyStretch
+	}
 	measure := func(a, b int) (w float64, y [numOrders]float64, z float64) {
 		start := a
 		if a > 0 && a < n && items[a].Kind == KGlue {
 			start = a + 1 // discard the glue we broke at
 		}
-		w = sumW[b] - sumW[start] + p.Background.Width
+		w = sumW[b] - sumW[start] + bg.Width
 		for o := range y {
-			y[o] = sumY[o][b] - sumY[o][start] + p.Background.Stretch[o]
+			y[o] = sumY[o][b] - sumY[o][start] + bg.Stretch[o]
 		}
-		z = sumZ[b] - sumZ[start] + p.Background.Shrink
+		z = sumZ[b] - sumZ[start] + bg.Shrink
 		if b < n && items[b].Kind == KPenalty {
 			w += items[b].Width
 		}
