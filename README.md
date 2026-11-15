@@ -183,6 +183,48 @@ breaking: 33.0pt too wide on the first, 21.5pt on the second. The README said th
 opposite up to v1.3.0, on an argument from demerits that was never put to the
 reference.
 
+## `\tracingparagraphs` (v1.7.0)
+
+**`Params.Trace`** is an `io.Writer` that receives TeX's own paragraph log, in
+tex.web's format to the character — because its whole value is being diffable
+against the reference:
+
+```
+@ via @@0 b=10000 p=0 d=100010000
+@@1: line 1.0 t=100010000 -> @@0
+@\discretionary via @@0 b=1 p=50 d=2633
+@@2: line 1.2- t=2633 -> @@0
+@\penalty via @@1 b=10000 p=100 d=100010000
+@\par via @@3 b=0 p=-10000 d=10100
+```
+
+A line-breaking divergence is otherwise inferred from glyph positions three
+layers downstream. With this, both engines state their own reasons — the badness
+`b`, the penalty `p`, the demerits `d` of every break considered, and the
+surviving active nodes with their totals — and the first line that differs is the
+divergence. Fitness digits are TeX's: 0 very loose, 1 loose, 2 decent, 3 tight;
+`-` marks a hyphenated break.
+
+⛔ **`b=*` is not "badness ≥ 10000".** §108 caps badness *at* `inf_bad`, so a
+computed badness reaches 10000 and never passes it. TeX reaches `inf_bad+1` by
+assignment in exactly one case — a line that *"cannot shrink enough to fit the
+necessary width"* (§16753-16756) — so the star means **overfull**, and `d=*` means
+`artificial_demerits`: the break was taken because the paragraph had no other way
+out, not because it was cheap.
+
+⚠ **Three things it deliberately does not do.** No `short_display` of the text
+between breaks (§16877): this package is handed items, never the words, so a diff
+against a real log must ignore those lines. `\kern` and `\math` are two of TeX's
+five break kinds and cannot arise here. And the pass markers — `@firstpass`,
+`@secondpass`, `@emergencypass` — are the caller's to print, since it is the
+caller that runs the passes.
+
+⚠ **The format is validated against tex.web's printing statements, not against a
+captured log.** Every `tracing_paragraphs` site in tex.web sits inside the
+`@!stat … tats` conditional, so a TeX built without that section emits nothing —
+which is the case for the tectonic used as this project's reference. A `tex` or
+`pdftex` built with statistics would close that gap.
+
 ## Tests
 
 `go test ./...` — 100% statement coverage, run on six 64-bit architectures

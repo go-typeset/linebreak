@@ -3,7 +3,11 @@
 
 package linebreak
 
-import "math"
+import (
+	"fmt"
+	"io"
+	"math"
+)
 
 // Package linebreak chooses where to break a paragraph into lines so that the
 // whole paragraph reads as evenly as possible. Given a horizontal list of items
@@ -109,6 +113,7 @@ type breakNode struct {
 	fitness  int        // fitness class of the line ending here (veryLoose…tight)
 	demerits float64    // total demerits of the best path to here
 	prev     *breakNode // the breakpoint that begins this line
+	serial   int        // tex.web's serial(passive), for Trace; 0 is the paragraph's start
 }
 
 // The four fitness classes TeX sorts lines into, by how hard their spaces had to
@@ -131,6 +136,34 @@ type Params struct {
 	AdjDemerits float64 // \adjdemerits: adjacent lines two fitness classes apart
 	DoubleHyph  float64 // \doublehyphendemerits: two hyphenated lines in a row
 	FinalHyph   float64 // \finalhyphendemerits: a hyphen on the last line but one
+
+	// Trace receives TeX's own \tracingparagraphs log, or nothing when nil.
+	//
+	// ⛔ THE FORMAT IS tex.web's, TO THE CHARACTER, BECAUSE ITS WHOLE VALUE IS
+	// BEING DIFFABLE AGAINST THE REFERENCE. A divergence in line breaking is
+	// otherwise inferred from glyph positions three layers downstream; with this
+	// the two engines state their own reasons — the badness, the penalty and the
+	// demerits of every break each one considered — and the first line that
+	// differs is the divergence.
+	//
+	// Two line kinds, and a caller writes the pass markers (@firstpass,
+	// @secondpass, @emergencypass) around its own passes, since it is the caller
+	// that runs them:
+	//
+	//	@\discretionary via @@0 b=131 p=50 d=11781   a feasible break (:16854-16875)
+	//	@@1: line 1.2- t=11781 -> @@0                a new active node (:16664-16674)
+	//
+	// `*` stands for "past inf_bad" in b and for artificial_demerits in d, as in
+	// TeX. The fitness digit is TeX's own numbering, which this package already
+	// shares: 0 very loose, 1 loose, 2 decent, 3 tight (:16099-16105). The `-`
+	// after it marks a hyphenated break.
+	//
+	// ⚠ What it does NOT reproduce is §16877's short_display of the material
+	// between breaks: this package is handed items and never the text, so the
+	// words TeX prints above each break line have no counterpart here. A diff
+	// against a real TeX log has to ignore those, which is why they are left out
+	// rather than approximated.
+	Trace io.Writer
 
 	// FinalPass turns on TeX's last resort: artificial_demerits.
 	//
@@ -289,6 +322,9 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 	// is charged like any other mismatch.
 	active := []*breakNode{{position: 0, line: 0, fitness: decent}}
 	var best *breakNode
+	// serial numbers the passive nodes for Trace, as tex.web does: the start of
+	// the paragraph is @@0 and the first real break is @@1.
+	serial := 0
 
 	// paraEnd is where the paragraph's LAST line ends: the last forced penalty in the
 	// list, or n when there is none.
@@ -437,6 +473,15 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 					d = demerits(r, order, fit, penaltyAt(items, b), flagged, a, items, atParaEnd, p)
 				}
 				total := a.demerits + d
+				// tex.web:16843-16845 prints HERE, inside "Record a new feasible
+				// break" and before the champion comparison below: every feasible
+				// break TeX considers reaches the log, not only the ones that win.
+				if p.Trace != nil {
+					fmt.Fprintf(p.Trace, "@%s via @@%d b=%s p=%d d=%s\n",
+						traceKind(items, b, paraEnd), a.serial,
+						traceBadness(r, order), int(penaltyAt(items, b)),
+						traceDemerits(d, artificial && !feasible))
+				}
 				if cur := bestHere[fit]; cur == nil || total < cur.demerits {
 					bestHere[fit] = &breakNode{position: b, line: a.line + 1, fitness: fit, demerits: total, prev: a}
 				}
@@ -457,6 +502,20 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 		for _, nd := range bestHere {
 			if nd == nil || nd.demerits > limit {
 				continue
+			}
+			// tex.web:16659-16674 prints here, as the active node is linked in, and
+			// the serial is assigned at the same moment — which is why a feasible
+			// break names its ancestor's serial and the start of the paragraph is
+			// @@0 (break_node(r)=null there).
+			serial++
+			nd.serial = serial
+			if p.Trace != nil {
+				hyph := ""
+				if flaggedAt(items, nd.position) || nd.position == paraEnd {
+					hyph = "-"
+				}
+				fmt.Fprintf(p.Trace, "@@%d: line %d.%d%s t=%d -> @@%d\n",
+					nd.serial, nd.line, nd.fitness, hyph, int(nd.demerits), nd.prev.serial)
 			}
 			active = append(active, nd)
 			// ⛔⛔ THE PARAGRAPH'S LAST LINE ENDS AT b == n, NOT AT ANY FORCED BREAK.
@@ -570,6 +629,70 @@ func highestOrder(y [numOrders]float64) uint8 {
 	}
 	return OrderPt
 }
+
+// ── \tracingparagraphs ──────────────────────────────────────────────────────
+//
+// Three helpers, each reproducing one of tex.web's printing decisions rather
+// than formatting a number the way Go would. See Params.Trace.
+
+// traceKind is what TeX prints after the "@": nothing at all for a break at
+// glue, the control sequence naming the node otherwise, and \par at the
+// paragraph's end, where cur_p is null (tex.web:16860-16866).
+//
+// ⚠ TeX has five cases and this package can reach three: it is handed items,
+// and a kern or a math node is not one of its kinds, so \kern and \math cannot
+// arise. A consumer that maps those onto Box loses the distinction before the
+// breaker sees it, which is worth knowing when diffing a log — the break is
+// still there, labelled as glue.
+func traceKind(items []Item, b, paraEnd int) string {
+	switch {
+	case b >= len(items) || b == paraEnd:
+		return `\par`
+	case items[b].Kind == KPenalty && items[b].Flagged:
+		return `\discretionary`
+	case items[b].Kind == KPenalty:
+		return `\penalty`
+	}
+	return ""
+}
+
+// traceBadness prints "*" for a line whose badness is past inf_bad, and the
+// badness itself otherwise (tex.web:16871).
+//
+// ⛔ THE STAR IS NOT "BADNESS ≥ 10000", AND TESTING THAT WOULD HAVE MADE IT DEAD
+// CODE. §108 caps badness AT inf_bad, so a computed badness can equal 10000 and
+// never exceed it — lineBadness here clamps the same way, and a `> 10000` test
+// never fires. TeX's `b` reaches inf_bad+1 by assignment, in exactly one case,
+// stated at :16753-16756:
+//
+//	This value will always be between zero and |inf_bad+1|; the latter value
+//	occurs only in the case of lines from |r| to |cur_p| that cannot shrink
+//	enough to fit the necessary width.
+//
+// and made at :16810, `if -shortfall>cur_active_width[6] then b:=inf_bad+1`.
+// "Cannot shrink enough" is r < −1 here, so that is the test. Found by the test
+// for this star failing on every bad line printing b=10000.
+func traceBadness(r float64, order uint8) string {
+	if r < -1 {
+		return "*"
+	}
+	return fmt.Sprintf("%d", int(lineBadness(r, order)))
+}
+
+// traceDemerits prints "*" when the demerits were forced to zero by
+// artificial_demerits and the number otherwise (tex.web:16874). The star is the
+// point of it: it says the break was taken because the paragraph had no other
+// way out, not because it was cheap.
+func traceDemerits(d float64, artificial bool) string {
+	if artificial {
+		return "*"
+	}
+	return fmt.Sprintf("%d", int(d))
+}
+
+// infBadness is tex.web's inf_bad (§108): the badness of a line that is as bad
+// as TeX will describe, and the threshold the trace marks with a star.
+const infBadness = 10000
 
 func penaltyAt(items []Item, b int) float64 {
 	if b < len(items) && items[b].Kind == KPenalty {
