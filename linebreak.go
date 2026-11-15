@@ -92,6 +92,17 @@ type Line struct {
 	Start, End int     // item index range [Start, End) actually set on the line
 	Ratio      float64 // glue adjustment ratio r (−1 fully shrunk … +tolerance stretched)
 
+	// Indent is the line's left margin, from the Measure the paragraph was
+	// broken with: 0 for every line of a uniform paragraph, and the hanging or
+	// \parshape margin otherwise.
+	//
+	// ⚠ IT IS NOT DERIVABLE FROM THE WIDTH. A negative \hangindent shortens
+	// the line and leaves the margin at ZERO — it indents from the right — so a
+	// consumer computing "hsize minus the width" would place those lines wrong
+	// (tex.web:16723-16724, :16729-16730). It is reported here so the rule
+	// lives once, in HangIndent, rather than once per caller.
+	Indent float64
+
 	// StretchOrder is the order Ratio is measured against: the HIGHEST order
 	// present on the line, since that one absorbs all of the slack and the
 	// lower ones are set at their natural width (tex.web §16620-16632, the same
@@ -263,7 +274,28 @@ func KnuthPlass(items []Item, lineWidth, tolerance, linePenalty float64) ([]Line
 
 // KnuthPlassWith is KnuthPlass with the costs stated explicitly, for a caller
 // that threads a document's own \adjdemerits and friends.
+//
+// The measure is one width for the whole paragraph, which is right for the
+// overwhelmingly common case. A paragraph with \hangindent or \parshape needs a
+// width PER LINE: see KnuthPlassShaped.
 func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
+	return KnuthPlassShaped(items, Uniform(lineWidth), p)
+}
+
+// KnuthPlassShaped breaks a paragraph whose lines do not all have the same
+// width: \hangindent with \hangafter, or \parshape.
+//
+// ⛔⛔ THE WIDTH IS AN INPUT TO EVERY CANDIDATE BREAK'S BADNESS, which is why
+// this cannot be done by breaking on one measure and indenting afterwards.
+// tex.web §847-850 recomputes line_width for each line inside the breaking
+// loop. Measured by a consumer against tectonic on a \hangindent=4em paragraph:
+// not only was the indent missing, the paragraph BROKE DIFFERENTLY — four ems
+// more text per line moved a phrase from the reference's line 4 onto line 3,
+// and a line gained or lost at the end of a paragraph becomes a page gained or
+// lost (go-typeset/linebreak#11).
+//
+// The line numbers handed to the Measure are 1-based, as TeX's are.
+func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 	// Prefix sums of width/stretch/shrink over items strictly before index i, so
 	// the material of a line from break a to break b is sums[b]−sums[a].
 	// ⛔ ONE COLUMN OF STRETCH PER ORDER. There was one, and a fil had to be
@@ -407,6 +439,11 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 		onlyActive := len(active) == 1
 		for _, a := range active {
 			w, y, z := measure(a.position, b)
+			// The line being tried runs FROM a, so it is a's line plus one —
+			// the same number the node recorded for it below (line: a.line+1).
+			// tex.web's "Compute the new line width" (:16740-16748) looks it up
+			// per candidate exactly here, inside try_break.
+			_, lineWidth := m.LineShape(a.line + 1)
 			r, order := ratio(w, y, z, lineWidth)
 			// A node stays active for *later* breaks only while the line to here is
 			// not already overfull past its shrink (r ≥ −1).
@@ -608,8 +645,13 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 		if start > 0 && start < n && items[start].Kind == KGlue {
 			start++
 		}
+		// nd.line is this line's own number (it was set to prev.line+1 when the
+		// node was made), so the SAME width the break was scored against is the
+		// one the Ratio is reported for. Measuring one and reporting the other
+		// is the mistake the comment on measure() warns about.
+		indent, lineWidth := m.LineShape(nd.line)
 		r, order := ratio(w, y, z, lineWidth)
-		rev = append(rev, Line{Start: start, End: nd.position, Ratio: r, StretchOrder: order})
+		rev = append(rev, Line{Start: start, End: nd.position, Ratio: r, StretchOrder: order, Indent: indent})
 	}
 	// reverse
 	lines := make([]Line, len(rev))
