@@ -403,7 +403,38 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 				if artificial && !feasible {
 					d = 0 // artificial_demerits
 				} else {
-					d = demerits(r, order, fit, penaltyAt(items, b), flaggedAt(items, b), a, items, b == n, p)
+					// ⛔⛔ THE PARAGRAPH-ENDING BREAK IS A DISTINGUISHED CALL, NOT THE LAST
+					// ITERATION OF THE LOOP. tex.web:17197-17198,
+					// @<Try the final line break at the end of the paragraph...@>:
+					//
+					//	begin try_break(eject_penalty,hyphenated);
+					//
+					// `break_type` is hyphenated UNCONDITIONALLY there, whatever item
+					// actually sits at the end — a paragraph ends on \parfillskip and a
+					// forced penalty, and a penalty is never a hyphen. So in
+					//
+					//	if (break_type=hyphenated)and(type(r)=hyphenated) then
+					//	  if cur_p<>null then d:=d+double_hyphen_demerits
+					//	  else d:=d+final_hyphen_demerits;      {:16906-16908}
+					//
+					// the test reduces at that break to "was the PREVIOUS break a hyphen",
+					// and `cur_p=null` then picks final_hyphen_demerits.
+					//
+					// This read `flaggedAt(items, b)` and `b == n`, which is wrong twice over
+					// and in a way that cancels into silence:
+					//
+					//   * `atEnd` was `b == n`, but the paragraph's last line ends at
+					//     `paraEnd` — the forced penalty — so \finalhyphendemerits was
+					//     UNREACHABLE and \doublehyphendemerits stood in for it
+					//     (go-typeset/linebreak#12 item 3);
+					//   * and `flagged` was the item's own flag, which at that same break is
+					//     a \penalty-10000 and therefore false — so NEITHER was charged.
+					//
+					// The second hides the first: fixing `atEnd` alone changes nothing while
+					// `flagged` is false there. A hyphen on the last line but one was free.
+					atParaEnd := b == paraEnd
+					flagged := flaggedAt(items, b) || atParaEnd
+					d = demerits(r, order, fit, penaltyAt(items, b), flagged, a, items, atParaEnd, p)
 				}
 				total := a.demerits + d
 				if cur := bestHere[fit]; cur == nil || total < cur.demerits {
