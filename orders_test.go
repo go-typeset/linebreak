@@ -21,12 +21,32 @@ import (
 func TestInfiniteStretchIsFeasibleAtAnyTolerance(t *testing.T) {
 	// Three short words on a wide measure. Justified, each line is hopeless:
 	// 10 wide on a measure of 300 with 1 of stretch is a ratio of 290.
+	// ⛔⛔ THIS FIXTURE SPELLS OUT ITS OWN \parfillskip, and it has to.
+	//
+	// withTerminator appends `Glue(0, 1e6, 0)` for \parfillskip — fil FLATTENED
+	// INTO THE FINITE COLUMN, which is the very mistake the comment above this test
+	// names. That cost nothing while a break discarded only one item: the glue after
+	// the forced penalty was KEPT on the second line, and its fil was what made the
+	// line's order OrderFil. The assertion below read as "the highest order present
+	// takes the slack" and was in fact reading a glue tex.web throws away.
+	//
+	// tex.web:16517-16534 steps OVER a penalty (`penalty_node: do_nothing` and then
+	// `s:=link(s)` all the same) and discards the glue behind it, so in TeX the
+	// second line's fil comes from \parfillskip — `0pt plus 1fil` — and from nowhere
+	// else. Spelled that way here, the test asserts what its own comment claims.
+	//
+	// ⚠ withTerminator's 1e6 is left alone: it is in every fixture in this package,
+	// and changing it moves the last line's badness in all of them. That is its own
+	// change with its own measurement (go-typeset/linebreak#20).
 	items := func(order uint8) []Item {
-		return withTerminator([]Item{
+		return []Item{
 			Box(10), GlueOrder(1, 1, order, 0.5), Box(10),
 			Penalty(0, -InfPenalty, false), // force a break so a short line must be set
 			GlueOrder(1, 1, order, 0.5), Box(10),
-		})
+			Penalty(0, InfPenalty, false),  // \parfillskip is never a breakpoint
+			GlueOrder(0, 1, OrderFil, 0),   // \parfillskip, as TeX writes it
+			Penalty(0, -InfPenalty, false), // end of paragraph
+		}
 	}
 	p := DefaultParams(200, 10)
 
