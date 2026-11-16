@@ -371,9 +371,9 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 	// 20pt, the reference starting that line at x=153.69 and go-tex at 133.77
 	// (go-tex/engine#657).
 	//
-	// The same test is made twice — here and where the lines are rebuilt — so both
-	// move together; fixing one would leave the Ratio measured on one span and the
-	// Start reported for another.
+	// ⛔⛔ AND IT IS THE WHOLE RUN, NOT ONE GLUE — see lineStart, which both this and
+	// the reconstruction below now call, so the Ratio is measured on the span the
+	// Start is reported for.
 	// ⚠ AND THE BACKGROUND IS ADDED HERE, once per line, because that is what
 	// it is: §16307-16315 seeds active_width with it before any item is walked,
 	// so every line's totals start from it rather than from zero.
@@ -386,10 +386,7 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 		bg.Stretch[0] += p.EmergencyStretch
 	}
 	measure := func(a, b int) (w float64, y [numOrders]float64, z float64) {
-		start := a
-		if a > 0 && a < n && items[a].Kind == KGlue {
-			start = a + 1 // discard the glue we broke at
-		}
+		start := lineStart(items, a, b)
 		w = sumW[b] - sumW[start] + bg.Width
 		for o := range y {
 			y[o] = sumY[o][b] - sumY[o][start] + bg.Stretch[o]
@@ -639,12 +636,10 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 	var rev []Line
 	for nd := best; nd.prev != nil; nd = nd.prev {
 		w, y, z := measure(nd.prev.position, nd.position)
-		// ⛔ start > 0 for the reason written on measure: the paragraph's first line
-		// begins where the paragraph begins, glue and all.
-		start := nd.prev.position
-		if start > 0 && start < n && items[start].Kind == KGlue {
-			start++
-		}
+		// ⛔ The SAME function measure() uses, for the reason written on it: a Start
+		// reported for one span while the Ratio was measured on another describes two
+		// different lines.
+		start := lineStart(items, nd.prev.position, nd.position)
 		// nd.line is this line's own number (it was set to prev.line+1 when the
 		// node was made), so the SAME width the break was scored against is the
 		// one the Ratio is reported for. Measuring one and reporting the other
@@ -659,6 +654,79 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 		lines[i] = rev[len(rev)-1-i]
 	}
 	return lines, true
+}
+
+// lineStart is where the line after a break at a begins: the first item that a
+// break does NOT discard.
+//
+// ⛔⛔ TeX DISCARDS A RUN, NOT AN ITEM, and this package used to discard exactly
+// one glue. tex.web:16506-16511 says what break_width is:
+//
+//	The |break_width| is usually negative, since it consists of the background
+//	… minus the width of nodes following~|cur_p| that are eliminated after a
+//	break. If, for example, node |cur_p| is a glue node, the width of this glue
+//	is subtracted from the background; and we also look ahead to eliminate all
+//	subsequent glue and penalty and kern and math nodes, subtracting their
+//	widths as well.
+//
+// and tex.web:16517-16534 is the loop, which this reproduces for the item kinds
+// that exist here:
+//
+//	s:=cur_p;
+//	while s<>null do
+//	  begin if is_char_node(s) then goto done;
+//	  case type(s) of
+//	  glue_node:    <subtract glue from break_width>;
+//	  penalty_node: do_nothing;
+//	  math_node:    break_width[1]:=break_width[1]-width(s);
+//	  kern_node:    if subtype(s)<>explicit then goto done
+//	                else break_width[1]:=break_width[1]-width(s);
+//	  othercases goto done
+//	  endcases;
+//	  s:=link(s);
+//	  end;
+//
+// ⭐ NOTE THE PENALTY CASE: `do_nothing`, and then `s:=link(s)` all the same. A
+// penalty does not stop the run, it is stepped over — so a break AT a penalty
+// discards the glue that follows it, which one-item discarding kept. A penalty's
+// own width is charged to the line that BREAKS there (measure adds it at the far
+// end), never to the line that follows.
+//
+// ⚠ TWO OF TeX's FOUR CASES CANNOT BE REACHED FROM HERE YET, and saying so is
+// part of the port. There is no KKern and no KMath: a consumer maps an explicit
+// kern and a math-on/off node to KBox (go-typeset/linebreak#12 item 8 reports the
+// same gap from the other side, for legal()), and a KBox ends the run. So the
+// glue-and-penalty half of §837 is faithful here and the kern-and-math half is
+// still unreachable — it needs the two item kinds, and that is an API addition,
+// not a change to this function.
+//
+// ⛔ a <= 0 IS NOT A BREAK. The active list is seeded with position 0, the
+// paragraph's beginning, where there is nothing to discard — tex.web:17001,
+// `prev_p:=cur_p; {glue at beginning is not a legal breakpoint}`. Discarding there
+// threw away \noindent\hskip 20pt's 20pt (go-tex/engine#657), which is what
+// initialglue_test.go guards.
+//
+// limit stops the run at the break the line ENDS at, so a line made of nothing
+// but discardables comes out empty (width = background) rather than negative.
+// Two adjacent penalties are both legal breaks, so that list is reachable.
+func lineStart(items []Item, a, limit int) int {
+	if a <= 0 {
+		return a
+	}
+	n := len(items)
+	if limit > n {
+		limit = n
+	}
+	s := a
+	for s < limit {
+		switch items[s].Kind {
+		case KGlue, KPenalty:
+			s++
+		default:
+			return s // a box is tex.web's char node: `goto done`
+		}
+	}
+	return s
 }
 
 // MaxBadRatio is the worst finite badness ratio the optimiser will consider: a
