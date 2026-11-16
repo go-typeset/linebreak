@@ -709,13 +709,17 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 // limit stops the run at the break the line ENDS at, so a line made of nothing
 // but discardables comes out empty (width = background) rather than negative.
 // Two adjacent penalties are both legal breaks, so that list is reachable.
+//
+// ⛔ limit MUST be at most len(items), and there is deliberately no clamp.
+// Both callers pass a break position — measure's `b`, the reconstruction's
+// nd.position — and both are bounded by len(items) by construction. A clamp for
+// the case neither can produce is a line no test can reach, which this package's
+// 100% gate turns into a red build and rightly: it caught exactly that here. And
+// a clamp is the wrong answer anyway — it would absorb a caller's out-of-range
+// limit and return a quietly wrong start, where an index panic names the bug.
 func lineStart(items []Item, a, limit int) int {
 	if a <= 0 {
 		return a
-	}
-	n := len(items)
-	if limit > n {
-		limit = n
 	}
 	s := a
 	for s < limit {
