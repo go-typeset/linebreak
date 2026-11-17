@@ -225,6 +225,35 @@ type Params struct {
 	// walked. A caller running the first two passes leaves this zero.
 	EmergencyStretch float64
 
+	// Looseness is \looseness: how many lines longer (or, negative, shorter) the
+	// paragraph should come out than the breaking would otherwise make it
+	// (tex.web:17197-17237).
+	//
+	// ⛔⛔ IT DOES NOT RE-BREAK THE PARAGRAPH. Every feasible way of ending the
+	// paragraph is already an active node when the last break is tried; TeX picks
+	// the one with fewest demerits, calls its line count best_line, and then — only
+	// if \looseness is non-zero — walks the SAME nodes again looking for one whose
+	// line count differs from best_line in the direction asked for:
+	//
+	//	line_diff:=line_number(r)-best_line;
+	//	if ((line_diff<actual_looseness)and(looseness<=line_diff))or
+	//	   ((line_diff>actual_looseness)and(looseness>=line_diff)) then
+	//	  begin best_bet:=r; actual_looseness:=line_diff; … end
+	//	else if (line_diff=actual_looseness)and(total_demerits(r)<fewest_demerits)…
+	//
+	// So it is a CHOICE among breakings that already exist, not a second search,
+	// and a paragraph with only one feasible ending cannot be loosened at all.
+	//
+	// ⛔ AND WHEN THE LOOSENESS CANNOT BE MATCHED, THE PASS FAILS. tex.web:17203 is
+	// `if (actual_looseness=looseness)or final_pass then goto done` — otherwise the
+	// pass ends without a result and the next, looser one runs, because a looser
+	// threshold admits more active nodes and therefore more line counts to choose
+	// between. That is reported here the way this package reports any failed pass:
+	// ok=false, with FinalPass accepting whatever was achieved. A caller that runs
+	// only one pass and sets Looseness must set FinalPass with it, or a paragraph
+	// it cannot loosen comes back as no paragraph.
+	Looseness int
+
 	// Background is what every line carries before its own material: TeX's
 	// \leftskip and \rightskip, which are added to EVERY line rather than
 	// appearing in the item list (tex.web §16307-16315, verbatim):
@@ -295,6 +324,40 @@ func KnuthPlassWith(items []Item, lineWidth float64, p Params) ([]Line, bool) {
 // lost (go-typeset/linebreak#11).
 //
 // The line numbers handed to the Measure are 1-based, as TeX's are.
+// lineSlot holds the best break of each fitness class for ONE line number —
+// tex.web's (line, fitness) half of its (position, line, fitness) state
+// (:16107-16114). With \looseness zero every line number shares slot 0, which is
+// the collapse :16716 licenses and the behaviour this package always had.
+type lineSlot struct {
+	line int
+	best [4]*breakNode
+}
+
+// chooseLooseness is tex.web's "Find the best active node for the desired
+// looseness" (:17221-17237), over the nodes that end the paragraph. It returns
+// the node to break at and whether the looseness asked for was reached.
+//
+// best is the fewest-demerits node and its line count is TeX's best_line; a
+// candidate is taken when its line_diff moves actual_looseness TOWARDS the
+// target without overshooting it, and ties on line_diff are settled by demerits.
+// Reading the two conditions as one sentence: among the endings on the side of
+// best_line that \looseness asks for, take the one furthest from best_line that
+// does not pass the target.
+func chooseLooseness(finals []*breakNode, best *breakNode, looseness int) (*breakNode, bool) {
+	bestLine := best.line
+	chosen, actual, fewest := best, 0, best.demerits
+	for _, r := range finals {
+		diff := r.line - bestLine
+		switch {
+		case (diff < actual && looseness <= diff) || (diff > actual && looseness >= diff):
+			chosen, actual, fewest = r, diff, r.demerits
+		case diff == actual && r.demerits < fewest:
+			chosen, fewest = r, r.demerits
+		}
+	}
+	return chosen, actual == looseness
+}
+
 func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 	// Prefix sums of width/stretch/shrink over items strictly before index i, so
 	// the material of a line from break a to break b is sums[b]−sums[a].
@@ -403,6 +466,8 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 	// is charged like any other mismatch.
 	active := []*breakNode{{position: 0, line: 0, fitness: decent}}
 	var best *breakNode
+	// Every node that ends the paragraph, kept for \looseness (see chooseLooseness).
+	var finals []*breakNode
 	// serial numbers the passive nodes for Trace, as tex.web does: the start of
 	// the paragraph is @@0 and the first real break is @@1.
 	serial := 0
@@ -430,7 +495,45 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 		// TeX keeps the best break for EACH fitness class, not one overall
 		// (§16480-16486): a line that is merely decent may be the wrong ancestor for
 		// the next one, and only keeping all four lets \adjdemerits decide.
-		var bestHere [4]*breakNode
+		//
+		// ⛔⛔ AND BY LINE NUMBER TOO WHEN \looseness IS NON-ZERO. tex.web:16107-16114
+		// says what the state is — "the best possible way to achieve each feasible
+		// combination of position, line, and fitness" — and then that collapsing the
+		// line dimension is an OPTIMISATION, licensed only "when the looseness
+		// parameter is zero". :16716 is the switch, in one line:
+		//
+		//	if looseness=0 then easy_line:=last_special_line
+		//	else easy_line:=max_halfword
+		//
+		// With easy_line at max_halfword no line number is ever equivalent to
+		// another, so endings of different LENGTHS survive side by side — which is
+		// the list \looseness then chooses from. Keyed by fitness alone, a paragraph
+		// offered exactly one ending and chooseLooseness had nothing to pick between:
+		// the parameter was implemented and inert.
+		var slots []lineSlot
+		slotAt := func(line int) int {
+			key := 0 // looseness 0: every line number is the same slot, as before
+			if p.Looseness != 0 {
+				key = line
+			}
+			for i := range slots {
+				if slots[i].line == key {
+					return i
+				}
+			}
+			slots = append(slots, lineSlot{line: key})
+			return len(slots) - 1
+		}
+		recorded := func() bool {
+			for i := range slots {
+				for _, nd := range slots[i].best {
+					if nd != nil {
+						return true
+					}
+				}
+			}
+			return false
+		}
 		// onlyActive mirrors TeX's "link(r)=last_active and prev_r=active": r is the
 		// one and only active node, so deactivating it loses the paragraph.
 		onlyActive := len(active) == 1
@@ -517,8 +620,7 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 			//
 			// desperate is that branch's own test: b>inf_bad, or pi=eject_penalty.
 			desperate := r < -1 || forced
-			artificial := p.FinalPass && desperate && onlyActive &&
-				bestHere[0] == nil && bestHere[1] == nil && bestHere[2] == nil && bestHere[3] == nil
+			artificial := p.FinalPass && desperate && onlyActive && !recorded()
 			if feasible || artificial {
 				fit := fitness(r, order)
 				var d float64
@@ -568,8 +670,9 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 						traceBadness(r, order), int(penaltyAt(items, b)),
 						traceDemerits(d, artificial && !feasible))
 				}
-				if cur := bestHere[fit]; cur == nil || total < cur.demerits {
-					bestHere[fit] = &breakNode{position: b, line: a.line + 1, fitness: fit, demerits: total, prev: a}
+				si := slotAt(a.line + 1)
+				if cur := slots[si].best[fit]; cur == nil || total < cur.demerits {
+					slots[si].best[fit] = &breakNode{position: b, line: a.line + 1, fitness: fit, demerits: total, prev: a}
 				}
 			}
 		}
@@ -579,58 +682,82 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 		// chosen in the end and is dropped here (tex.web §16476-16487) — which is
 		// also what stops the active list from growing fourfold.
 		lowest := math.Inf(1)
-		for _, nd := range bestHere {
-			if nd != nil && nd.demerits < lowest {
-				lowest = nd.demerits
+		for i := range slots {
+			for _, nd := range slots[i].best {
+				if nd != nil && nd.demerits < lowest {
+					lowest = nd.demerits
+				}
 			}
 		}
 		limit := lowest + math.Abs(p.AdjDemerits)
-		for _, nd := range bestHere {
-			if nd == nil || nd.demerits > limit {
-				continue
-			}
-			// tex.web:16659-16674 prints here, as the active node is linked in, and
-			// the serial is assigned at the same moment — which is why a feasible
-			// break names its ancestor's serial and the start of the paragraph is
-			// @@0 (break_node(r)=null there).
-			serial++
-			nd.serial = serial
-			if p.Trace != nil {
-				hyph := ""
-				if flaggedAt(items, nd.position) || nd.position == paraEnd {
-					hyph = "-"
+		// ⛔ IN SLOT ORDER, which is the order the line numbers were first reached,
+		// so the active list and the trace do not depend on map iteration. A
+		// breaker whose output moves between runs cannot be compared with anything.
+		for i := range slots {
+			for _, nd := range slots[i].best {
+				if nd == nil || nd.demerits > limit {
+					continue
 				}
-				fmt.Fprintf(p.Trace, "@@%d: line %d.%d%s t=%d -> @@%d\n",
-					nd.serial, nd.line, nd.fitness, hyph, int(nd.demerits), nd.prev.serial)
-			}
-			active = append(active, nd)
-			// ⛔⛔ THE PARAGRAPH'S LAST LINE ENDS AT b == n, NOT AT ANY FORCED BREAK.
-			//
-			// This read `if forced && …`, and a forced penalty in the MIDDLE of the
-			// paragraph is forced too — so such a node could become the paragraph's
-			// final node and everything after it was silently dropped. It did not bite
-			// while a path was allowed to span the forced break and reach b == n with
-			// lower demerits; closing that path (see the survivors above, tex.web
-			// §16769) exposed it at once: a four-word fixture with a forced penalty in
-			// the middle came back as ONE line ending at the penalty, the last two
-			// words gone.
-			//
-			// tex.web §16054-16064: line_break finishes by following the active node
-			// reached when cur_p is null — the end of the LIST. A break inside the
-			// paragraph is an ancestor of that node, never a substitute for it.
-			//
-			// ⛔ And the end is `paraEnd`, the LAST forced penalty, not n. n is one past
-			// the final item: choosing it adds an empty last line holding nothing but
-			// the \parfillskip and the terminating penalty. Every existing test grew
-			// exactly one such line when this said `b == n`.
-			if b == paraEnd && (best == nil || nd.demerits < best.demerits) {
-				best = nd
+				// tex.web:16659-16674 prints here, as the active node is linked in, and
+				// the serial is assigned at the same moment — which is why a feasible
+				// break names its ancestor's serial and the start of the paragraph is
+				// @@0 (break_node(r)=null there).
+				serial++
+				nd.serial = serial
+				if p.Trace != nil {
+					hyph := ""
+					if flaggedAt(items, nd.position) || nd.position == paraEnd {
+						hyph = "-"
+					}
+					fmt.Fprintf(p.Trace, "@@%d: line %d.%d%s t=%d -> @@%d\n",
+						nd.serial, nd.line, nd.fitness, hyph, int(nd.demerits), nd.prev.serial)
+				}
+				active = append(active, nd)
+				// ⛔⛔ THE PARAGRAPH'S LAST LINE ENDS AT b == n, NOT AT ANY FORCED BREAK.
+				//
+				// This read `if forced && …`, and a forced penalty in the MIDDLE of the
+				// paragraph is forced too — so such a node could become the paragraph's
+				// final node and everything after it was silently dropped. It did not bite
+				// while a path was allowed to span the forced break and reach b == n with
+				// lower demerits; closing that path (see the survivors above, tex.web
+				// §16769) exposed it at once: a four-word fixture with a forced penalty in
+				// the middle came back as ONE line ending at the penalty, the last two
+				// words gone.
+				//
+				// tex.web §16054-16064: line_break finishes by following the active node
+				// reached when cur_p is null — the end of the LIST. A break inside the
+				// paragraph is an ancestor of that node, never a substitute for it.
+				//
+				// ⛔ And the end is `paraEnd`, the LAST forced penalty, not n. n is one past
+				// the final item: choosing it adds an empty last line holding nothing but
+				// the \parfillskip and the terminating penalty. Every existing test grew
+				// exactly one such line when this said `b == n`.
+				if b == paraEnd {
+					// ⛔ EVERY ending is kept, not only the cheapest. \looseness chooses
+					// among them (tex.web:17207-17237) and cannot choose from a list of
+					// one. Keeping the minimum alone was invisible while Looseness was
+					// unread, which is #12 item (7).
+					finals = append(finals, nd)
+					if best == nil || nd.demerits < best.demerits {
+						best = nd
+					}
+				}
 			}
 		}
 	}
 
 	if best == nil {
 		return nil, false
+	}
+	if p.Looseness != 0 {
+		var matched bool
+		best, matched = chooseLooseness(finals, best, p.Looseness)
+		// tex.web:17203, verbatim in effect: the looseness has to be matched, or
+		// this pass does not finish and a looser one runs — except on the final
+		// pass, which takes the closest it reached.
+		if !matched && !p.FinalPass {
+			return nil, false
+		}
 	}
 	// Reconstruct lines from the best final node.
 	var rev []Line
