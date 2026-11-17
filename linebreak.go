@@ -524,16 +524,13 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 			slots = append(slots, lineSlot{line: key})
 			return len(slots) - 1
 		}
-		recorded := func() bool {
-			for i := range slots {
-				for _, nd := range slots[i].best {
-					if nd != nil {
-						return true
-					}
-				}
-			}
-			return false
-		}
+		// ⛔ A SLOT EXISTS ONLY BECAUSE A NODE WENT INTO IT: slotAt is called one
+		// line before the assignment below, and a brand-new slot's class is nil, so
+		// that assignment always happens. "has anything been recorded at this break
+		// position" is therefore len(slots) > 0, and the four-way nil test this
+		// replaced (bestHere[0]==nil && … ) had the same meaning when there was one
+		// implicit slot.
+		recorded := func() bool { return len(slots) > 0 }
 		// onlyActive mirrors TeX's "link(r)=last_active and prev_r=active": r is the
 		// one and only active node, so deactivating it loses the paragraph.
 		onlyActive := len(active) == 1

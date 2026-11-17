@@ -97,6 +97,45 @@ func TestALoosenessThatCannotBeMetFailsOffTheFinalPass(t *testing.T) {
 	}
 }
 
+// ⛔ TIES ON line_diff ARE SETTLED BY DEMERITS, which is the second arm of
+// tex.web:17230-17233 and the one a whole-paragraph fixture reaches only by
+// accident:
+//
+//	else if (line_diff=actual_looseness)and(total_demerits(r)<fewest_demerits) then
+//	  begin best_bet:=r; fewest_demerits:=total_demerits(r); end
+//
+// Two endings of the SAME length are equally loose, so the rule has nothing to
+// say about looseness and falls back to the ordinary criterion: take the cheaper.
+// Tested on the function directly, because building a paragraph whose feasible
+// endings tie on length and differ on cost would witness that arithmetic rather
+// than this rule.
+func TestChooseLoosenessSettlesTiesOnDemerits(t *testing.T) {
+	// best has 3 lines; two candidates have 4 (line_diff +1) at different cost.
+	best := &breakNode{position: 9, line: 3, demerits: 100}
+	dear := &breakNode{position: 8, line: 4, demerits: 900}
+	cheap := &breakNode{position: 7, line: 4, demerits: 300}
+
+	got, matched := chooseLooseness([]*breakNode{best, dear, cheap}, best, +1)
+	if !matched {
+		t.Error("looseness +1 with a 4-line ending present: actual_looseness should be +1")
+	}
+	if got != cheap {
+		t.Errorf("chose the ending at position %d (demerits %.0f), want the one at "+
+			"%d (demerits %.0f): an equal line_diff is settled by demerits",
+			got.position, got.demerits, cheap.position, cheap.demerits)
+	}
+
+	// ⛔ AND THE ORDER MUST NOT DECIDE IT. The same three the other way round: the
+	// first arm takes `cheap` on its way up from actual_looseness 0, and the
+	// tie-break must then refuse to replace it with the dearer one.
+	got, _ = chooseLooseness([]*breakNode{best, cheap, dear}, best, +1)
+	if got != cheap {
+		t.Errorf("with the candidates reversed the choice moved to position %d: the "+
+			"rule must not depend on the order the endings were recorded in",
+			got.position)
+	}
+}
+
 // ⛔ THE CONTROL: \looseness=0 is the behaviour this package always had, and the
 // line-keyed state must not change it. Without this row the change above could
 // have moved every ordinary paragraph and nothing would have said so.
