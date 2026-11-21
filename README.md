@@ -183,6 +183,18 @@ breaking: 33.0pt too wide on the first, 21.5pt on the second. The README said th
 opposite up to v1.3.0, on an argument from demerits that was never put to the
 reference.
 
+## tex.web's integer badness (v1.13.0)
+
+By default a line's badness is the float `100·|r|³`. tex.web §108 computes it in
+integers from the shortfall `t` and the stretch `s` in scaled points —
+`r = t·297 div s`, `(r³ + 2¹⁷) div 2¹⁸`, capped at 10000 — and the two decide
+differently on a band of shortfalls around every boundary (fitness 12 and 99,
+`\tolerance`): at badness 12 the float flips to "loose" at `t/s = 0.4932`, §108 at
+`0.5007`. `TeXBadness(t, s int) int` is §108, transcribed; `Params.ScaledPoints`
+declares that every width, stretch and shrink is an integer number of scaled points
+and makes the breaker use it for feasibility, fitness and demerits. Off (the zero
+value), nothing changes.
+
 ## `\tracingparagraphs` (v1.7.0)
 
 **`Params.Trace`** is an `io.Writer` that receives TeX's own paragraph log, in

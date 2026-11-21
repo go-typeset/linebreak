@@ -142,11 +142,16 @@ const (
 // value is not useful; DefaultParams holds the values every LaTeX document runs
 // with (latex.ltx:498-514).
 type Params struct {
-	Tolerance   float64 // \tolerance: the worst BADNESS a line may have (100·ratio³)
-	LinePenalty float64 // \linepenalty: charged once per line, so fewer lines cost less
-	AdjDemerits float64 // \adjdemerits: adjacent lines two fitness classes apart
-	DoubleHyph  float64 // \doublehyphendemerits: two hyphenated lines in a row
-	FinalHyph   float64 // \finalhyphendemerits: a hyphen on the last line but one
+	// ScaledPoints says that every width, stretch and shrink handed in is an
+	// integer number of scaled points, and asks for tex.web §108's integer
+	// badness (TeXBadness) instead of the float 100·r³. Off, behaviour is the
+	// unit-free float that non-TeX consumers have always had.
+	ScaledPoints bool
+	Tolerance    float64 // \tolerance: the worst BADNESS a line may have (100·ratio³)
+	LinePenalty  float64 // \linepenalty: charged once per line, so fewer lines cost less
+	AdjDemerits  float64 // \adjdemerits: adjacent lines two fitness classes apart
+	DoubleHyph   float64 // \doublehyphendemerits: two hyphenated lines in a row
+	FinalHyph    float64 // \finalhyphendemerits: a hyphen on the last line but one
 
 	// Trace receives TeX's own \tracingparagraphs log, or nothing when nil.
 	//
@@ -581,7 +586,8 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 			// large finite stretch by the caller, the badness came out large but
 			// finite, the first pass failed, and the hyphens of a JUSTIFIED paragraph
 			// appeared under ragged glue (#12 item 1).
-			feasible := r >= -1 && lineBadness(r, order) <= p.Tolerance
+			lb := p.lineBad(w, y, z, lineWidth, r, order)
+			feasible := r >= -1 && lb <= p.Tolerance
 			// ⛔⛔ TEX'S LAST RESORT IS INSIDE ONE BRANCH, AND THAT BRANCH IS THE WHOLE
 			// RULE. tex.web §16769-16775, the three sentences in their own order:
 			//
@@ -619,7 +625,7 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 			desperate := r < -1 || forced
 			artificial := p.FinalPass && desperate && onlyActive && !recorded()
 			if feasible || artificial {
-				fit := fitness(r, order)
+				fit := fitness(r, order, lb)
 				var d float64
 				if artificial && !feasible {
 					d = 0 // artificial_demerits
@@ -655,7 +661,7 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 					// `flagged` is false there. A hyphen on the last line but one was free.
 					atParaEnd := b == paraEnd
 					flagged := flaggedAt(items, b) || atParaEnd
-					d = demerits(r, order, fit, penaltyAt(items, b), flagged, a, items, atParaEnd, p)
+					d = demerits(lb, fit, penaltyAt(items, b), flagged, a, items, atParaEnd, p)
 				}
 				total := a.demerits + d
 				// tex.web:16843-16845 prints HERE, inside "Record a new feasible
@@ -664,7 +670,7 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 				if p.Trace != nil {
 					fmt.Fprintf(p.Trace, "@%s via @@%d b=%s p=%d d=%s\n",
 						traceKind(items, b, paraEnd), a.serial,
-						traceBadness(r, order), int(penaltyAt(items, b)),
+						traceBadness(r, lb), int(penaltyAt(items, b)),
 						traceDemerits(d, artificial && !feasible))
 				}
 				si := slotAt(a.line + 1)
@@ -962,11 +968,11 @@ func traceKind(items []Item, b, paraEnd int) string {
 // and made at :16810, `if -shortfall>cur_active_width[6] then b:=inf_bad+1`.
 // "Cannot shrink enough" is r < −1 here, so that is the test. Found by the test
 // for this star failing on every bad line printing b=10000.
-func traceBadness(r float64, order uint8) string {
+func traceBadness(r, b float64) string {
 	if r < -1 {
 		return "*"
 	}
-	return fmt.Sprintf("%d", int(lineBadness(r, order)))
+	return fmt.Sprintf("%d", int(b))
 }
 
 // traceDemerits prints "*" when the demerits were forced to zero by
@@ -1008,8 +1014,10 @@ func flaggedAt(items []Item, b int) bool {
 // with fil on it loose. The order must be passed in; computing it from the
 // ratio is impossible, because a ratio of 0.3 says nothing about which column
 // the 0.3 was measured against.
-func fitness(r float64, order uint8) int {
-	b := lineBadness(r, order)
+//
+// b is the line's badness as the caller computed it (Params.lineBad), so the
+// class and the tolerance test are cut on the SAME number.
+func fitness(r float64, order uint8, b float64) int {
 	if order > OrderPt && r >= 0 {
 		return decent
 	}
@@ -1044,8 +1052,8 @@ func fitness(r float64, order uint8) int {
 // such a paragraph would be charged alike the paragraph's SHAPE would still come
 // out justified. That is #12 item (1) surviving in the cost function after being
 // fixed in the feasibility test.
-func demerits(r float64, order uint8, fit int, pen float64, flagged bool, a *breakNode, items []Item, atEnd bool, p Params) float64 {
-	base := p.LinePenalty + lineBadness(r, order)
+func demerits(b float64, fit int, pen float64, flagged bool, a *breakNode, items []Item, atEnd bool, p Params) float64 {
+	base := p.LinePenalty + b
 	var d float64
 	if math.Abs(base) >= 10000 {
 		d = 1e8 // TeX's ceiling: past this the line is hopeless, not merely bad
@@ -1082,6 +1090,68 @@ func lineBadness(r float64, order uint8) float64 {
 		return 0
 	}
 	return badness(r)
+}
+
+// lineBad is the badness of the line from a to b, on the scale the caller chose.
+//
+// By default that is the float 100·|r|³ (lineBadness). With Params.ScaledPoints
+// it is tex.web §108's integer badness(t,s), computed from the widths themselves
+// — t the shortfall (or excess), s the stretch of the order that sets the line
+// (or the shrink) — because r = t/s in floating point has already lost what §108
+// rounds: the float and §108 disagree on a band of shortfalls around every
+// decision boundary (12, 99, \tolerance), and the band is not a single sp.
+func (p Params) lineBad(w float64, y [numOrders]float64, z, L, r float64, order uint8) float64 {
+	if !p.ScaledPoints || order > OrderPt && r >= 0 || r < -1 || r >= MaxBadRatio {
+		return lineBadness(r, order)
+	}
+	if r >= 0 {
+		return float64(TeXBadness(int(math.Round(L-w)), int(math.Round(y[order]))))
+	}
+	return float64(TeXBadness(int(math.Round(w-L)), int(math.Round(z))))
+}
+
+// TeXBadness is tex.web §108's badness(t,s): how hard glue of stretchability (or
+// shrinkability) s must work to take up a shortfall (or excess) t, as an integer
+// from 0 to inf_bad (10000). t and s are scaled points.
+//
+//	function badness(t,s:scaled):halfword; {compute badness, given t>=0}
+//	begin if t=0 then badness:=0
+//	else if s<=0 then badness:=inf_bad
+//	else  begin if t<=7230584 then r:=(t*297) div s
+//	  else if s>=1663497 then r:=t div (s div 297)
+//	  else r:=t;
+//	  if r>1290 then badness:=inf_bad
+//	  else badness:=(r*r*r+@'400000) div @'1000000;
+//	  end;
+//	end;
+//
+// The three branches are overflow guards for 32-bit Pascal integers, and they
+// change results, so they are kept: 297³ = 99.94·2¹⁸ scales the cube to 100·(t/s)³,
+// 7230584 is where t·297 would overflow, 1290³ < 2³¹ < 1291³. @'400000 and
+// @'1000000 are OCTAL: 2¹⁷ (the rounding half) and 2¹⁸. A negative t is the caller's
+// error (§108 says "given t>=0"), and answers inf_bad rather than a plausible number.
+func TeXBadness(t, s int) int {
+	switch {
+	case t < 0:
+		return int(InfPenalty)
+	case t == 0:
+		return 0
+	case s <= 0:
+		return int(InfPenalty)
+	}
+	var r int64
+	switch {
+	case t <= 7230584:
+		r = int64(t) * 297 / int64(s)
+	case s >= 1663497:
+		r = int64(t) / (int64(s) / 297)
+	default:
+		r = int64(t)
+	}
+	if r > 1290 {
+		return int(InfPenalty)
+	}
+	return int((r*r*r + 0o400000) / 0o1000000)
 }
 
 // badness is 100·|r|³, capped: how far a line's spaces had to stretch or shrink,
