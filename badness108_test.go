@@ -102,13 +102,29 @@ func TestScaledPointsDecideOnTheIntegerBadness(t *testing.T) {
 	if _, ok := KnuthPlassWith(items, L, p); ok {
 		t.Fatal("float badness 12.13 was accepted at tolerance 12")
 	}
-	p.ScaledPoints = true
+	p.ScaledPointsPerUnit = 1
 	lines, ok := KnuthPlassWith(items, L, p)
 	if !ok {
 		t.Fatal("§108 badness 12 was refused at tolerance 12")
 	}
 	if len(lines) != 2 {
 		t.Fatalf("got %d lines, want 2", len(lines))
+	}
+}
+
+// The same fixture in TeX points (sp/65536, exact in binary): the unit is
+// declared, not assumed, so a consumer that hands over points gets §108 too.
+func TestScaledPointsPerUnitConvertsPoints(t *testing.T) {
+	const pt = 65536.0
+	items := []Item{
+		Box(20000 / pt), Glue(10000/pt, 100000/pt, 0), Box(20000 / pt),
+		Glue(10000/pt, 100000/pt, 0), Box(60000 / pt),
+		Penalty(0, InfPenalty, false), GlueOrder(0, 1, OrderFil, 0),
+	}
+	p := DefaultParams(12, 0)
+	p.ScaledPointsPerUnit = pt
+	if _, ok := KnuthPlassWith(items, 99500/pt, p); !ok {
+		t.Fatal("§108 badness 12 was refused at tolerance 12, widths in points")
 	}
 }
 
@@ -124,7 +140,7 @@ func TestScaledPointsDecideOnTheIntegerBadnessWhenShrinking(t *testing.T) {
 	if _, ok := KnuthPlassWith(items, L, p); ok {
 		t.Fatal("float badness 12.13 was accepted at tolerance 12")
 	}
-	p.ScaledPoints = true
+	p.ScaledPointsPerUnit = 1
 	if _, ok := KnuthPlassWith(items, L, p); !ok {
 		t.Fatal("§108 badness 12 was refused at tolerance 12")
 	}
