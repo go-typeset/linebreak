@@ -678,7 +678,15 @@ func KnuthPlassShaped(items []Item, m Measure, p Params) ([]Line, bool) {
 						traceDemerits(d, artificial && !feasible))
 				}
 				si := slotAt(a.line + 1)
-				if cur := slots[si].best[fit]; cur == nil || total < cur.demerits {
+				// ⛔ A TIE GOES TO THE LATER ACTIVE NODE. tex.web §855 (:16848) is
+				//
+				//	if d<=minimal_demerits[fit_class] then
+				//
+				// not `<`: active nodes are visited in list order, so on equal demerits
+				// the one visited last — the later line start — replaces the earlier.
+				// With `<` the first one stayed, which moved the first divergence from
+				// the reference in about 6 of 20 papers and in every centred title.
+				if cur := slots[si].best[fit]; cur == nil || total <= cur.demerits {
 					slots[si].best[fit] = &breakNode{position: b, line: a.line + 1, fitness: fit, demerits: total, prev: a}
 				}
 			}
