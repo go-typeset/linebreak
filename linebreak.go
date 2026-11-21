@@ -142,16 +142,20 @@ const (
 // value is not useful; DefaultParams holds the values every LaTeX document runs
 // with (latex.ltx:498-514).
 type Params struct {
-	// ScaledPoints says that every width, stretch and shrink handed in is an
-	// integer number of scaled points, and asks for tex.web §108's integer
-	// badness (TeXBadness) instead of the float 100·r³. Off, behaviour is the
-	// unit-free float that non-TeX consumers have always had.
-	ScaledPoints bool
-	Tolerance    float64 // \tolerance: the worst BADNESS a line may have (100·ratio³)
-	LinePenalty  float64 // \linepenalty: charged once per line, so fewer lines cost less
-	AdjDemerits  float64 // \adjdemerits: adjacent lines two fitness classes apart
-	DoubleHyph   float64 // \doublehyphendemerits: two hyphenated lines in a row
-	FinalHyph    float64 // \finalhyphendemerits: a hyphen on the last line but one
+	// ScaledPointsPerUnit asks for tex.web §108's integer badness (TeXBadness)
+	// instead of the float 100·r³, and says how many scaled points one unit of
+	// every width, stretch and shrink handed in is: 1 when they are already
+	// scaled points, 65536 when they are TeX points. Each is multiplied by it
+	// and rounded to an integer sp before §108 sees it, which is exact for any
+	// value that is a whole number of sp (a power-of-two division like
+	// sp/65536 round-trips). Zero, the default, is the unit-free float that
+	// non-TeX consumers have always had.
+	ScaledPointsPerUnit float64
+	Tolerance           float64 // \tolerance: the worst BADNESS a line may have (100·ratio³)
+	LinePenalty         float64 // \linepenalty: charged once per line, so fewer lines cost less
+	AdjDemerits         float64 // \adjdemerits: adjacent lines two fitness classes apart
+	DoubleHyph          float64 // \doublehyphendemerits: two hyphenated lines in a row
+	FinalHyph           float64 // \finalhyphendemerits: a hyphen on the last line but one
 
 	// Trace receives TeX's own \tracingparagraphs log, or nothing when nil.
 	//
@@ -1094,20 +1098,22 @@ func lineBadness(r float64, order uint8) float64 {
 
 // lineBad is the badness of the line from a to b, on the scale the caller chose.
 //
-// By default that is the float 100·|r|³ (lineBadness). With Params.ScaledPoints
-// it is tex.web §108's integer badness(t,s), computed from the widths themselves
-// — t the shortfall (or excess), s the stretch of the order that sets the line
-// (or the shrink) — because r = t/s in floating point has already lost what §108
-// rounds: the float and §108 disagree on a band of shortfalls around every
-// decision boundary (12, 99, \tolerance), and the band is not a single sp.
+// By default that is the float 100·|r|³ (lineBadness). With
+// Params.ScaledPointsPerUnit it is tex.web §108's integer badness(t,s), computed
+// from the widths themselves — t the shortfall (or excess), s the stretch of the
+// order that sets the line (or the shrink) — because r = t/s in floating point
+// has already lost what §108 rounds: the float and §108 disagree on a band of
+// shortfalls around every decision boundary (12, 99, \tolerance), and the band
+// is not a single sp.
 func (p Params) lineBad(w float64, y [numOrders]float64, z, L, r float64, order uint8) float64 {
-	if !p.ScaledPoints || order > OrderPt && r >= 0 || r < -1 || r >= MaxBadRatio {
+	k := p.ScaledPointsPerUnit
+	if k <= 0 || order > OrderPt && r >= 0 || r < -1 || r >= MaxBadRatio {
 		return lineBadness(r, order)
 	}
 	if r >= 0 {
-		return float64(TeXBadness(int(math.Round(L-w)), int(math.Round(y[order]))))
+		return float64(TeXBadness(int(math.Round((L-w)*k)), int(math.Round(y[order]*k))))
 	}
-	return float64(TeXBadness(int(math.Round(w-L)), int(math.Round(z))))
+	return float64(TeXBadness(int(math.Round((w-L)*k)), int(math.Round(z*k))))
 }
 
 // TeXBadness is tex.web §108's badness(t,s): how hard glue of stretchability (or

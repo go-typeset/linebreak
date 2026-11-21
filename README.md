@@ -190,10 +190,10 @@ integers from the shortfall `t` and the stretch `s` in scaled points —
 `r = t·297 div s`, `(r³ + 2¹⁷) div 2¹⁸`, capped at 10000 — and the two decide
 differently on a band of shortfalls around every boundary (fitness 12 and 99,
 `\tolerance`): at badness 12 the float flips to "loose" at `t/s = 0.4932`, §108 at
-`0.5007`. `TeXBadness(t, s int) int` is §108, transcribed; `Params.ScaledPoints`
-declares that every width, stretch and shrink is an integer number of scaled points
-and makes the breaker use it for feasibility, fitness and demerits. Off (the zero
-value), nothing changes.
+`0.5007`. `TeXBadness(t, s int) int` is §108, transcribed; `Params.ScaledPointsPerUnit`
+says how many scaled points one unit of every width, stretch and shrink is (1 for
+sp, 65536 for TeX points) and makes the breaker use §108 for feasibility, fitness and
+demerits. Zero, the default, changes nothing.
 
 ## `\tracingparagraphs` (v1.7.0)
 
